@@ -40,24 +40,37 @@ func LoadOrCreateKey(dir string) (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Exclusive creation: two concurrent first-joins must converge on
-	// ONE key — if the loser overwrote the file after the hub bound the
-	// winner's key, the name would be unclaimable on the next reconnect
-	// for the bus's lifetime (PR #20 review). The loser loads the
-	// winner's key instead.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if os.IsExist(err) {
-		return LoadOrCreateKey(dir)
-	}
+	// Atomic exclusive publish: two concurrent first-joins must
+	// converge on ONE key, and the loser must never read a half-written
+	// file. The key is fully written (and synced) to a private temp
+	// file first; os.Link then publishes it exclusively — it fails with
+	// EEXIST if someone else won, and a reader can only ever see a
+	// complete file (PR #20 review).
+	tmp, err := os.CreateTemp(dir, keyFile+".tmp*")
 	if err != nil {
 		return nil, err
 	}
+	defer os.Remove(tmp.Name())
 	enc := base64.StdEncoding.EncodeToString(priv.Seed())
-	if _, err := f.WriteString(enc + "\n"); err != nil {
-		f.Close()
+	if _, err := tmp.WriteString(enc + "\n"); err != nil {
+		tmp.Close()
 		return nil, err
 	}
-	if err := f.Close(); err != nil {
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return nil, err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Link(tmp.Name(), path); err != nil {
+		if os.IsExist(err) {
+			return LoadOrCreateKey(dir) // lost the race: adopt the winner's key
+		}
 		return nil, err
 	}
 	return priv, nil
