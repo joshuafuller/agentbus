@@ -88,6 +88,62 @@ func TestDriverLinePassesChatThrough(t *testing.T) {
 	}
 }
 
+// The host participates like anyone else: with --on-msg it is a rider
+// (tasks addressed to it run through the lifecycle), without it a
+// driver (task payloads render readable). Previously a host rider's
+// wake command got raw A2A-MSG JSON and no snapshot ever returned —
+// the requester always timed out. (PR #11 review.)
+func TestHostSinkRoutesTasksToRider(t *testing.T) {
+	ran := make(chan string, 1)
+	delivered := make(chan string, 4)
+	r := &task.Rider{
+		Dir:    t.TempDir(),
+		Runner: func(prompt string) (string, error) { ran <- prompt; return "done", nil },
+		Send:   func(string) {},
+	}
+	sink := func(line string) { delivered <- line }
+	route := hostSink(r, sink)
+
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("host task"))
+	route(bus.Message("alice", task.EncodeMessage(msg)))
+
+	select {
+	case p := <-ran:
+		if p != "host task" {
+			t.Fatalf("runner got %q", p)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("task addressed to the host never reached its rider")
+	}
+	select {
+	case l := <-delivered:
+		t.Fatalf("task request also leaked to the host sink: %q", l)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Chat still flows to the sink.
+	route(bus.Message("alice", "hello host"))
+	if l := <-delivered; l != bus.Message("alice", "hello host") {
+		t.Fatalf("chat mangled: %q", l)
+	}
+}
+
+func TestHostSinkRendersForDriverHost(t *testing.T) {
+	delivered := make(chan string, 2)
+	route := hostSink(nil, func(line string) { delivered <- line })
+
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("x"))
+	tk := a2a.NewSubmittedTask(msg, msg)
+	route(bus.Message("rider", task.EncodeTask(tk)))
+	l := <-delivered
+	if strings.Contains(l, "{") {
+		t.Fatalf("driver host still sees JSON: %q", l)
+	}
+	if !strings.Contains(l, "submitted") {
+		t.Fatalf("driver host line %q missing state", l)
+	}
+}
+
 func TestExecRunnerCapturesStdoutAsResult(t *testing.T) {
 	runner := execRunner(`printf 'got:%s' "$AGENTBUS_MSG"`)
 	out, err := runner("hi there")
@@ -137,6 +193,35 @@ func TestTaskFailureExitsNonzero(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "failed") {
 		t.Fatalf("output missing failure state:\n%s", out.String())
+	}
+}
+
+// A lost bus connection must be reported as what it is, not disguised
+// as a timeout: "task still submitted after 5s" hides the real failure
+// when the stream ended early. (PR #11 review.)
+func TestTaskReportsStreamEndNotTimeout(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { client.Close() })
+	go func() {
+		br := bufio.NewReader(server)
+		br.ReadString('\n') // HELLO
+		server.Write([]byte(bus.Notice("welcome aboard, alice — 2 on the bus") + "\n"))
+		req, _ := br.ReadString('\n') // the task request
+		_, payload, _ := bus.ParseAddressed(strings.TrimSpace(req))
+		msg, _ := task.DecodeMessage(payload)
+		tk := a2a.NewSubmittedTask(msg, msg)
+		// One SUBMITTED snapshot, then the bus vanishes mid-task.
+		server.Write([]byte(bus.Message("worker", task.EncodeTask(tk)) + "\n"))
+		server.Close()
+	}()
+
+	var out strings.Builder
+	code := runTaskConn(client, "alice", "worker", "x", 5*time.Second, &out)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; out=%q", code, out.String())
+	}
+	if !strings.Contains(out.String(), "stream ended") && !strings.Contains(out.String(), "connection") {
+		t.Fatalf("output hides the stream loss behind timeout wording: %q", out.String())
 	}
 }
 

@@ -65,11 +65,20 @@ func runTaskConn(conn net.Conn, name, rider, prompt string, timeout time.Duratio
 		fmt.Fprintf(out, "%s  %s\n", renderState(snap.Status.State), snap.ID)
 	})
 
+	timedOut := time.Now().After(deadline)
 	switch {
-	case final == nil:
+	case final == nil && timedOut:
 		fmt.Fprintf(out, "task never acknowledged by %s within %s — the rider may be deaf (wire self-test: issue #8)\n", rider, timeout)
 		return 2
-	case err != nil || !final.Status.State.Terminal():
+	case final == nil:
+		fmt.Fprintf(out, "no answer from the bus: %v\n", err)
+		return 2
+	case !final.Status.State.Terminal() && !timedOut:
+		// The stream ended before the deadline: report the loss itself,
+		// not a timeout that never happened.
+		fmt.Fprintf(out, "bus connection lost while task was %s: %v\n", renderState(final.Status.State), err)
+		return 2
+	case !final.Status.State.Terminal():
 		fmt.Fprintf(out, "task still %s after %s — no terminal state reached\n", renderState(final.Status.State), timeout)
 		return 2
 	case final.Status.State == a2a.TaskStateCompleted:
@@ -95,6 +104,35 @@ func driverLine(line string) string {
 		return rendered
 	}
 	return line
+}
+
+// hostSink routes the host's own deliveries the same way a join routes
+// a rider's or driver's: with a task rider (host has --on-msg), task
+// requests addressed to the host run through the lifecycle instead of
+// leaking raw JSON into the wake command; without one, the host is a
+// driver and task payloads render readable. Chat passes to the sink
+// either way.
+func hostSink(rider *task.Rider, sink func(line string)) func(line string) {
+	return func(line string) {
+		from, payload, ok := bus.ParseMessage(line)
+		if !ok {
+			sink(line)
+			return
+		}
+		if rider != nil {
+			if _, isTask := task.DecodeMessage(payload); isTask {
+				rider.Handle(from, payload)
+				return
+			}
+			sink(line)
+			return
+		}
+		if rendered, ok := task.RenderLine(from, payload); ok {
+			sink(rendered)
+			return
+		}
+		sink(line)
+	}
 }
 
 // execRunner adapts the rider's --on-msg wake command into a task

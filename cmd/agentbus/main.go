@@ -85,7 +85,7 @@ func main() {
 	case "host":
 		fs.Parse(args)
 		validateName()
-		err = runHost(*name, sinkFor(*inbox, *onMsg))
+		err = runHost(*name, *onMsg, sinkFor(*inbox, *onMsg))
 	case "join":
 		ticket, rest := popTicket(args)
 		fs.Parse(rest)
@@ -178,8 +178,26 @@ func logf() func(string, ...any) {
 	return func(string, ...any) {}
 }
 
-func runHost(name string, sink *bus.Sink) error {
-	hub := bus.NewHub(name, sink.Deliver)
+func runHost(name, onMsg string, sink *bus.Sink) error {
+	// With --on-msg the host is a rider like any other: tasks addressed
+	// to it run the lifecycle, with results broadcast back as addressed
+	// lines. Without it the host is a driver and hostSink renders task
+	// payloads readable.
+	var hub *bus.Hub
+	var hostRider *task.Rider
+	if onMsg != "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		dir := filepath.Join(home, ".agentbus", "rider-"+name, "tasks")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		hostRider = &task.Rider{Dir: dir, Runner: execRunner(onMsg),
+			Send: func(line string) { hub.Broadcast(line) }}
+	}
+	hub = bus.NewHub(name, hostSink(hostRider, sink.Deliver))
 	hub.OnNotice = func(line string) { fmt.Println(line) }
 	// Task lifecycle transitions become feed notices every driver sees
 	// (issue #12). Injected here because bus cannot import task.
@@ -188,7 +206,13 @@ func runHost(name string, sink *bus.Sink) error {
 	// when the name rejoins. 24h is long enough to sleep on a task and
 	// short enough that a renamed rider's spool does not rot forever.
 	if home, err := os.UserHomeDir(); err == nil {
-		hub.Spool = bus.NewFileSpool(filepath.Join(home, ".agentbus", "spool"), 24*time.Hour)
+		spool := bus.NewFileSpool(filepath.Join(home, ".agentbus", "spool"), 24*time.Hour)
+		// Bound disk at startup: expired entries for names that never
+		// rejoined would otherwise wait for a drain that never comes.
+		if err := spool.SweepExpired(); err != nil {
+			fmt.Fprintf(os.Stderr, "agentbus: spool sweep: %v\n", err)
+		}
+		hub.Spool = spool
 	} else {
 		fmt.Fprintf(os.Stderr, "agentbus: no home dir (%v) — offline spool disabled\n", err)
 	}
@@ -285,9 +309,10 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 		if rider != nil {
 			if from, payload, ok := bus.ParseMessage(line); ok {
 				if _, isTask := task.DecodeMessage(payload); isTask {
-					// Run in the background so a minutes-long model turn
-					// never stops this loop from reading the bus.
-					go rider.Handle(from, payload)
+					// Handle enqueues and returns; the rider's worker runs
+					// tasks strictly one at a time so concurrent turns never
+					// race the persisted model conversation.
+					rider.Handle(from, payload)
 					continue
 				}
 			}

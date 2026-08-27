@@ -2,7 +2,9 @@ package task
 
 import (
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/joshuafuller/agentbus/internal/bus"
@@ -54,11 +56,11 @@ func TestDecodeRejectsForeignPayloads(t *testing.T) {
 // transition goes back to the requester as an addressed A2A-TASK line.
 func TestRiderHandlesTaskMessage(t *testing.T) {
 	dir := t.TempDir()
-	var sent []string
+	sentCh := make(chan string, 8)
 	r := &Rider{
 		Dir:    dir,
 		Runner: func(prompt string) (string, error) { return "did: " + prompt, nil },
-		Send:   func(line string) { sent = append(sent, line) },
+		Send:   func(line string) { sentCh <- line },
 	}
 
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("count to 3"))
@@ -66,8 +68,15 @@ func TestRiderHandlesTaskMessage(t *testing.T) {
 		t.Fatal("Handle did not claim an A2A-MSG payload")
 	}
 
-	if len(sent) != 3 {
-		t.Fatalf("sent %d lines, want 3 (submitted, working, completed): %v", len(sent), sent)
+	// Execution is asynchronous; collect the three snapshots.
+	var sent []string
+	for len(sent) < 3 {
+		select {
+		case l := <-sentCh:
+			sent = append(sent, l)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("sent %d lines, want 3 (submitted, working, completed): %v", len(sent), sent)
+		}
 	}
 	var states []a2a.TaskState
 	var final *a2a.Task
@@ -91,6 +100,62 @@ func TestRiderHandlesTaskMessage(t *testing.T) {
 	}
 	if final.Status.Message.Parts[0].Text() != "did: count to 3" {
 		t.Fatalf("result missing: %+v", final.Status)
+	}
+}
+
+// Two tasks arriving back to back must run one after the other: the
+// runner resumes ONE persisted model conversation (claude --continue /
+// codex resume), and concurrent turns against it race. (PR #11 review.)
+// Handle must also return quickly — the caller is the join read loop,
+// which may not stall for the length of a model turn.
+func TestRiderSerializesTaskExecution(t *testing.T) {
+	var mu sync.Mutex
+	running, maxRunning, runs := 0, 0, 0
+	r := &Rider{
+		Dir: t.TempDir(),
+		Runner: func(prompt string) (string, error) {
+			mu.Lock()
+			running++
+			if running > maxRunning {
+				maxRunning = running
+			}
+			mu.Unlock()
+			time.Sleep(50 * time.Millisecond)
+			mu.Lock()
+			running--
+			runs++
+			mu.Unlock()
+			return "ok", nil
+		},
+		Send: func(string) {},
+	}
+
+	start := time.Now()
+	for i := 0; i < 3; i++ {
+		msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("t"))
+		if !r.Handle("alice", EncodeMessage(msg)) {
+			t.Fatal("Handle did not claim the task")
+		}
+	}
+	if d := time.Since(start); d > 40*time.Millisecond {
+		t.Fatalf("Handle blocked the caller for %v; it must enqueue and return", d)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		done := runs == 3
+		mu.Unlock()
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d/3 tasks ran", runs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if maxRunning != 1 {
+		t.Fatalf("runner overlapped: %d concurrent invocations, want 1", maxRunning)
 	}
 }
 

@@ -104,6 +104,32 @@ func TestSpoolRejectsUnsafeRiderName(t *testing.T) {
 	}
 }
 
+// TTL must not depend on the rider ever coming back: entries for
+// misspelled or abandoned names would otherwise sit on disk forever,
+// and a peer could fill the filesystem by addressing unused names.
+// (PR #14 review.) SweepExpired walks every rider dir.
+func TestSweepExpiredClearsAbandonedNames(t *testing.T) {
+	dir := t.TempDir()
+	s := NewFileSpool(dir, 50*time.Millisecond)
+	s.Add("typo-rider", "[x] never collected")
+	s.Add("gone-rider", "[x] also stale")
+	time.Sleep(80 * time.Millisecond)
+	s.Add("live-rider", "[x] fresh")
+
+	if err := s.SweepExpired(); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.Pending("typo-rider"); n != 0 {
+		t.Fatalf("typo-rider still has %d entries after sweep", n)
+	}
+	if n := s.Pending("gone-rider"); n != 0 {
+		t.Fatalf("gone-rider still has %d entries after sweep", n)
+	}
+	if n := s.Pending("live-rider"); n != 1 {
+		t.Fatalf("live-rider's fresh entry was swept (pending=%d)", n)
+	}
+}
+
 func TestSpoolPendingCount(t *testing.T) {
 	s := NewFileSpool(t.TempDir(), time.Hour)
 	s.Add("r", "[x] one")

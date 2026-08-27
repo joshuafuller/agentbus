@@ -187,7 +187,8 @@ held until real usage demands it:
 | Sender authentication | Identity is its own subsystem | signed names / MLS |
 | Multiparty group crypto | Two-party transport works first | above the transport |
 
-> Two of these are now under active reconsideration, not because the rule
+> Two of these — sender authentication and per-rider revocation — are now
+> under active reconsideration, not because the rule
 > changed but because the rule's trigger fired: the activation loop got real
 > cross-host usage on 2026-08-27 and sender authentication failed
 > non-adversarially within hours. See

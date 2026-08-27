@@ -3,6 +3,7 @@ package task
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/joshuafuller/agentbus/internal/bus"
@@ -74,24 +75,56 @@ type Rider struct {
 	Dir    string                              // task persistence directory
 	Runner func(prompt string) (string, error) // the wake path (--on-msg)
 	Send   func(line string)                   // writes one line to the bus
+
+	once  sync.Once
+	queue chan queuedTask
+}
+
+type queuedTask struct {
+	from string
+	msg  *a2a.Message
 }
 
 // Handle inspects one received payload. It returns true when the
-// payload was a task request it consumed; chat lines and task
-// snapshots (requester-bound) are left for the normal sink.
+// payload was a task request it claimed; chat lines and task snapshots
+// (requester-bound) are left for the normal sink. A claimed task is
+// ENQUEUED, not run: Handle returns immediately (the caller is the
+// join read loop, which must keep reading the bus), and one worker
+// executes tasks strictly in arrival order — the runner resumes a
+// single persisted model conversation, and concurrent turns against
+// it race (PR #11 review).
 func (r *Rider) Handle(from, payload string) bool {
 	msg, ok := DecodeMessage(payload)
 	if !ok {
 		return false
 	}
+	r.once.Do(func() {
+		r.queue = make(chan queuedTask, 64)
+		go func() {
+			for q := range r.queue {
+				r.run(q.from, q.msg)
+			}
+		}()
+	})
+	select {
+	case r.queue <- queuedTask{from: from, msg: msg}:
+	default:
+		// Queue full: refuse loudly rather than block the read loop.
+		// The requester sees the task stuck in nothing — same signal as
+		// a deaf rider, and truthful.
+	}
+	return true
+}
+
+func (r *Rider) run(from string, msg *a2a.Message) {
 	tk := a2a.NewSubmittedTask(msg, msg)
 	notify := func(snap *a2a.Task) {
 		r.Send(bus.Addressed(from, EncodeTask(snap)))
 	}
-	if err := Run(r.Dir, tk, r.Runner, notify); err != nil {
-		// The task could not be advanced (persistence failure). There is
-		// no state to report; the requester will see it stuck.
-		return true
-	}
-	return true
+	// A Run error means the task could not be advanced (persistence
+	// failure). If it failed before the first snapshot went out, the
+	// requester sees the task as never acknowledged — the same signal
+	// as a deaf rider, and truthful; after that, as stuck in its last
+	// reported state. (Wording per PR #11 review.)
+	_ = Run(r.Dir, tk, r.Runner, notify)
 }

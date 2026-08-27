@@ -121,6 +121,12 @@ drop lines.
 * <text>
 ```
 
+Every line to a peer flows through a per-peer outbox drained by one
+writer: a peer that stops reading stalls only itself, and one that
+falls more than 256 lines behind is disconnected rather than allowed
+to wedge the bus. A disconnected rider's subsequent addressed lines
+spool as usual.
+
 Notices carry presence and status (`… hopped on the bus`, `… reconnected`,
 `… hopped off the bus`, the welcome line). They are shown to humans and
 **never** delivered to an agent's activation path — so a rider joining can

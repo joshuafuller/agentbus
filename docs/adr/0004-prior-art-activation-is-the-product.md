@@ -5,7 +5,8 @@
 
 ## Context
 
-Before starting on the A2A work ([0001](0001-adopt-a2a-for-task-semantics.md)–
+Before starting on the A2A work ([0001](0001-adopt-a2a-for-task-semantics.md),
+[0002](0002-rider-identity-signed-agent-cards.md),
 [0003](0003-addressed-delivery-primary.md)), a prior-art scan found two
 projects occupying the same space, and both were read in full:
 
