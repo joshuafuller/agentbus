@@ -219,18 +219,16 @@ func TestTaskNoticeHookIgnoresPlainAddressedLines(t *testing.T) {
 // returning its sender, envelope id, and payload.
 func recvEnvelope(t *testing.T, ch chan string) (from, id, payload string) {
 	t.Helper()
-	for {
-		l := recvMessage(t, ch)
-		f, body, ok := ParseMessage(l)
-		if !ok {
-			t.Fatalf("not a message: %q", l)
-		}
-		id, p, ok := ParseEnvelope(body)
-		if !ok {
-			t.Fatalf("addressed delivery not enveloped: %q", l)
-		}
-		return f, id, p
+	l := recvMessage(t, ch)
+	f, body, ok := ParseMessage(l)
+	if !ok {
+		t.Fatalf("not a message: %q", l)
 	}
+	id, p, ok := ParseEnvelope(body)
+	if !ok {
+		t.Fatalf("addressed delivery not enveloped: %q", l)
+	}
+	return f, id, p
 }
 
 // The ACK contract end to end: an addressed line arrives enveloped,

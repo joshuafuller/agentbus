@@ -1,6 +1,7 @@
 package bus
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -62,11 +63,24 @@ func TestSpoolSurvivesRestart(t *testing.T) {
 	}
 }
 
+// addAged plants a spool entry stamped age in the past — expiry tests
+// must not depend on real sleeps racing a TTL on a slow CI runner.
+func addAged(t *testing.T, dir, rider, line string, age time.Duration) {
+	t.Helper()
+	rdir := filepath.Join(dir, rider)
+	if err := os.MkdirAll(rdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("%019d-%06d.line", time.Now().Add(-age).UnixNano(), 1)
+	if err := os.WriteFile(filepath.Join(rdir, name), []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSpoolExpiresOldEntriesAtDrain(t *testing.T) {
 	dir := t.TempDir()
-	s := NewFileSpool(dir, 50*time.Millisecond)
-	s.Add("r", "[x] stale")
-	time.Sleep(80 * time.Millisecond)
+	s := NewFileSpool(dir, time.Hour)
+	addAged(t, dir, "r", "[x] stale", 2*time.Hour)
 	s.Add("r", "[x] fresh")
 	got := drainAll(t, s, "r")
 	if len(got) != 1 || got[0] != "[x] fresh" {
@@ -166,10 +180,9 @@ func TestRemoveRejectsUnsafeIDs(t *testing.T) {
 // (PR #14 review.) SweepExpired walks every rider dir.
 func TestSweepExpiredClearsAbandonedNames(t *testing.T) {
 	dir := t.TempDir()
-	s := NewFileSpool(dir, 50*time.Millisecond)
-	s.Add("typo-rider", "[x] never collected")
-	s.Add("gone-rider", "[x] also stale")
-	time.Sleep(80 * time.Millisecond)
+	s := NewFileSpool(dir, time.Hour)
+	addAged(t, dir, "typo-rider", "[x] never collected", 2*time.Hour)
+	addAged(t, dir, "gone-rider", "[x] also stale", 3*time.Hour)
 	s.Add("live-rider", "[x] fresh")
 
 	if err := s.SweepExpired(); err != nil {
@@ -190,11 +203,12 @@ func TestSweepExpiredClearsAbandonedNames(t *testing.T) {
 // stale entries for never-returning names accumulate until the next
 // restart, which may be never. (PR #15 review.)
 func TestSweepEveryExpiresWhileRunning(t *testing.T) {
-	s := NewFileSpool(t.TempDir(), 40*time.Millisecond)
+	dir := t.TempDir()
+	s := NewFileSpool(dir, time.Hour)
 	stop := s.SweepEvery(25*time.Millisecond, nil)
 	defer stop()
 
-	s.Add("abandoned", "[x] never collected")
+	addAged(t, dir, "abandoned", "[x] never collected", 2*time.Hour)
 	deadline := time.Now().Add(2 * time.Second)
 	for s.Pending("abandoned") != 0 {
 		if time.Now().After(deadline) {

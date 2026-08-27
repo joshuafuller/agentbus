@@ -229,12 +229,26 @@ func TestRiderRejectsWhenQueueFull(t *testing.T) {
 // is overloaded. (PR #17 review, P1.)
 func TestRejectDoesNotBlockTheCaller(t *testing.T) {
 	block := make(chan struct{})
-	defer close(block)
+	var terminals atomic.Int32
+	// Release the worker, then wait for every task's terminal snapshot
+	// (emitted after its final disk write) before TempDir cleanup runs.
+	defer func() {
+		close(block)
+		deadline := time.Now().Add(10 * time.Second)
+		for terminals.Load() < int32(taskQueueDepth+1) && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
 	blockingSend := make(chan string) // unbuffered, nobody reads: Send blocks
 	r := &Rider{
 		Dir:    t.TempDir(),
 		Runner: func(string) (string, error) { <-block; return "ok", nil },
 		Send: func(line string) {
+			if _, payload, ok := bus.ParseAddressed(line); ok {
+				if tk, ok := DecodeTask(payload); ok && tk.Status.State.Terminal() {
+					terminals.Add(1)
+				}
+			}
 			select {
 			case blockingSend <- line:
 			case <-block:
