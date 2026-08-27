@@ -70,6 +70,26 @@ func ParseMessage(line string) (from, text string, ok bool) {
 	return line[1:end], line[end+2:], true
 }
 
+// Addressed formats a line addressed to one rider by name (without
+// newline). The hub relays it only to peers holding that name; nobody
+// else sees it, so an addressed line never wakes an uninvolved agent.
+func Addressed(to, payload string) string {
+	return "TO " + to + " " + payload
+}
+
+// ParseAddressed splits an addressed line into target name and payload.
+func ParseAddressed(line string) (to, payload string, ok bool) {
+	rest, found := strings.CutPrefix(line, "TO ")
+	if !found {
+		return "", "", false
+	}
+	to, payload, found = strings.Cut(rest, " ")
+	if !found || to == "" || payload == "" {
+		return "", "", false
+	}
+	return to, payload, true
+}
+
 // Notice formats a system notice line (without newline).
 func Notice(text string) string {
 	return "* " + text

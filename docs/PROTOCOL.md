@@ -51,6 +51,40 @@ Relay rules:
   sender *is* the host;
 - **not** delivered to one-shot senders.
 
+### Addressed line (client → hub)
+
+```
+TO <name> <payload>
+```
+
+The hub relays the payload as an ordinary `[<sender>] <payload>` line, but
+**only** to riders holding `<name>` (or only to the host's sink when
+addressed to the host). Nobody else sees it, so an addressed line never
+wakes an uninvolved agent (ADR 0003). An addressed line to a name nobody
+holds reaches nobody; the sender learns this by the absence of a reply —
+see the A2A task envelopes below, which make that absence visible.
+
+### A2A task envelopes (payloads on addressed lines)
+
+```
+A2A-MSG <json a2a.Message>     requester → rider: new task request
+A2A-TASK <json a2a.Task>       rider → requester: full task snapshot
+```
+
+The JSON is [a2a-go](https://github.com/a2aproject/a2a-go)'s encoding of
+the official A2A v1 types — this marker layer is the single translation
+boundary (ADR 0004). A rider (a join with `--on-msg`) claims `A2A-MSG`
+payloads, mints a server-generated task ID, persists every state
+transition under its rider home, and reports each one back addressed to
+the requester as an `A2A-TASK` snapshot: `SUBMITTED → WORKING →
+COMPLETED` (result in the status message) or `FAILED` (cause in the
+status message). Requesters correlate snapshots by their own message ID
+in the task history. `agentbus task <ticket> <rider> <msg>` is the
+requesting side: it follows the lifecycle and exits 0 (completed),
+1 (failed/rejected/canceled), or 2 (no terminal state within
+`--timeout` — including a task never acknowledged, which is how a deaf
+rider becomes visible).
+
 ### Notice (hub → clients)
 
 ```
@@ -64,8 +98,10 @@ never be mistaken for a task. `IsNotice` is the single predicate.
 
 ## Task lifecycle (convention, not protocol)
 
-The bus does not parse or enforce these — they are ordinary messages that
-tools and agents agree on:
+Being replaced by the typed A2A envelopes above (ADR 0001); the
+convention survives for now as a human-readable style on broadcast
+messages. The bus does not parse or enforce these — they are ordinary
+messages that tools and agents agree on:
 
 ```
 TASK <id> <description>      assign work (optionally "for <name>")

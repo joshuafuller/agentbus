@@ -90,6 +90,59 @@ func TestThreePeersRelay(t *testing.T) {
 	}
 }
 
+func TestAddressedLineReachesOnlyTarget(t *testing.T) {
+	sink := make(chan string, 8)
+	h := NewHub("host", func(line string) { sink <- line })
+
+	a, _ := testPeer(t, h, "alice")
+	_, bLines := testPeer(t, h, "bob")
+	_, cLines := testPeer(t, h, "carol")
+
+	if _, err := a.Write([]byte(Addressed("bob", "A2A-MSG {}") + "\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	if l := recvMessage(t, bLines); l != Message("alice", "A2A-MSG {}") {
+		t.Fatalf("bob got %q", l)
+	}
+	// carol and the host sink must see nothing.
+	select {
+	case l := <-cLines:
+		if !IsNotice(l) {
+			t.Fatalf("carol received addressed line: %q", l)
+		}
+	case <-time.After(100 * time.Millisecond):
+	}
+	select {
+	case l := <-sink:
+		t.Fatalf("host sink received addressed line: %q", l)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestAddressedLineToHostReachesSinkOnly(t *testing.T) {
+	sink := make(chan string, 8)
+	h := NewHub("host", func(line string) { sink <- line })
+
+	a, _ := testPeer(t, h, "alice")
+	_, bLines := testPeer(t, h, "bob")
+
+	if _, err := a.Write([]byte(Addressed("host", "A2A-TASK {}") + "\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	if l := recvLine(t, sink); l != Message("alice", "A2A-TASK {}") {
+		t.Fatalf("host sink got %q", l)
+	}
+	select {
+	case l := <-bLines:
+		if !IsNotice(l) {
+			t.Fatalf("bob received line addressed to host: %q", l)
+		}
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestOneshotSenderNotEchoedToSameName(t *testing.T) {
 	h := NewHub("host", nil)
 	// Persistent rider and a one-shot sender share the name "codex".

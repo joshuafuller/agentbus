@@ -62,6 +62,25 @@ func strings_repeat(s string, n int) string {
 	return out
 }
 
+func TestAddressedRoundTrip(t *testing.T) {
+	line := Addressed("bob", `A2A-MSG {"messageId":"m1"}`)
+	to, payload, ok := ParseAddressed(line)
+	if !ok {
+		t.Fatalf("ParseAddressed rejected %q", line)
+	}
+	if to != "bob" || payload != `A2A-MSG {"messageId":"m1"}` {
+		t.Fatalf("got to=%q payload=%q", to, payload)
+	}
+}
+
+func TestParseAddressedRejectsPlainLines(t *testing.T) {
+	for _, line := range []string{"hi there", "[a] hi", "* notice", "TO", "TO onlyname", ""} {
+		if _, _, ok := ParseAddressed(line); ok {
+			t.Fatalf("ParseAddressed accepted %q", line)
+		}
+	}
+}
+
 func TestNotice(t *testing.T) {
 	if !IsNotice(Notice("codex-1 hopped on the bus")) {
 		t.Fatal("Notice output not recognized by IsNotice")

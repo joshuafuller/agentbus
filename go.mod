@@ -2,7 +2,10 @@ module github.com/joshuafuller/agentbus
 
 go 1.26.5
 
-require github.com/tailscale/tailcat v0.0.0-20260827014119-c04c5afee401
+require (
+	github.com/a2aproject/a2a-go/v2 v2.5.0
+	github.com/tailscale/tailcat v0.0.0-20260827014119-c04c5afee401
+)
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
@@ -19,6 +22,7 @@ require (
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/hdevalence/ed25519consensus v0.2.0 // indirect
 	github.com/jsimonetti/rtnetlink v1.4.1 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect

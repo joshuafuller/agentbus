@@ -16,10 +16,13 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/joshuafuller/agentbus/internal/bus"
+	"github.com/joshuafuller/agentbus/internal/task"
 	"github.com/tailscale/tailcat"
 )
 
@@ -32,6 +35,8 @@ Usage:
   agentbus host [flags]                 start a bus, print its ticket
   agentbus join <ticket> [flags]        ride the bus (stays connected)
   agentbus send <ticket> [flags] <msg>  send one message and exit
+  agentbus task <ticket> <rider> <msg>  send an A2A task to one rider and
+                                        follow it to completion or failure
   agentbus invite <ticket> [flags]      print a copy-paste boarding pass
                                         that onboards a fresh agent
   agentbus await [--inbox <file>]       block until unread messages exist,
@@ -85,12 +90,22 @@ func main() {
 		ticket, rest := popTicket(args)
 		fs.Parse(rest)
 		validateName()
-		err = runJoin(ticket, *name, sinkFor(*inbox, *onMsg))
+		err = runJoin(ticket, *name, *onMsg, sinkFor(*inbox, *onMsg))
 	case "send":
 		ticket, rest := popTicket(args)
 		fs.Parse(rest)
 		validateName()
 		err = runSend(ticket, *name, strings.Join(fs.Args(), " "))
+	case "task":
+		ticket, rest := popTicket(args)
+		timeout := fs.Duration("timeout", 10*time.Minute, "give up if the task has not finished by then")
+		fs.Parse(rest)
+		validateName()
+		if fs.NArg() < 2 {
+			fmt.Fprintln(os.Stderr, "agentbus: task needs a rider name and a message")
+			os.Exit(2)
+		}
+		err = runTask(ticket, *name, fs.Arg(0), strings.Join(fs.Args()[1:], " "), *timeout)
 	case "await":
 		fs.Parse(args)
 		err = runAwait(*inbox)
@@ -204,7 +219,7 @@ func dial(ticket string) (net.Conn, error) {
 	return c.DialTCPPort(ctx, busPort)
 }
 
-func runJoin(ticket, name string, sink *bus.Sink) error {
+func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 	conn, err := dial(ticket)
 	if err != nil {
 		return err
@@ -212,11 +227,39 @@ func runJoin(ticket, name string, sink *bus.Sink) error {
 	defer conn.Close()
 	fmt.Fprintf(conn, "%s\n", bus.Hello(name))
 
+	// The conn is written from stdin forwarding, and — when this join
+	// is a wired rider — from task goroutines reporting state. Guard it
+	// so concurrent lines never interleave mid-line.
+	var writeMu sync.Mutex
+	sendLine := func(line string) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		fmt.Fprintf(conn, "%s\n", line)
+	}
+
+	// A join with a wake command is a rider: A2A task requests are
+	// claimed here and run through the task lifecycle instead of the
+	// plain sink, with stdout as the result. Joins without --on-msg
+	// (humans on --inbox) leave task traffic to the sink, visible as
+	// ordinary lines.
+	var rider *task.Rider
+	if onMsg != "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		dir := filepath.Join(home, ".agentbus", "rider-"+name, "tasks")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		rider = &task.Rider{Dir: dir, Runner: execRunner(onMsg), Send: sendLine}
+	}
+
 	go func() {
 		sc := bufio.NewScanner(os.Stdin)
 		for sc.Scan() {
 			if t := strings.TrimSpace(sc.Text()); t != "" {
-				fmt.Fprintf(conn, "%s\n", t)
+				sendLine(t)
 			}
 		}
 	}()
@@ -227,6 +270,16 @@ func runJoin(ticket, name string, sink *bus.Sink) error {
 		if bus.IsNotice(line) {
 			fmt.Println(line) // visible to humans, never delivered to agents
 			continue
+		}
+		if rider != nil {
+			if from, payload, ok := bus.ParseMessage(line); ok {
+				if _, isTask := task.DecodeMessage(payload); isTask {
+					// Run in the background so a minutes-long model turn
+					// never stops this loop from reading the bus.
+					go rider.Handle(from, payload)
+					continue
+				}
+			}
 		}
 		sink.Deliver(line)
 	}
