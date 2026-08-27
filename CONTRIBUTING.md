@@ -6,6 +6,8 @@ kind. Please read [SECURITY.md](SECURITY.md) and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before proposing changes;
 the design has deliberate non-goals, and "add durable state / identity /
 admission" is held on purpose until the activation loop has real usage.
+Decisions that shape the project are recorded in [docs/adr/](docs/adr/);
+read those before proposing a direction change.
 
 ## Setup
 
