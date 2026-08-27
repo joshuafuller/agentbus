@@ -38,9 +38,10 @@ mkdir -p ~/.agentbus
 agentbus join <ticket> --name <your-name> --inbox ~/.agentbus/inbox
 ```
 
-Your name gets key-bound on first join. The key lives at
-`~/.agentbus/rider-<name>/id_ed25519` — don't delete it or you lose the name
-until the bus restarts. Operators sending under a rider's name must do it from
+A name gets key-bound the first time any rider joins with it — if someone
+claimed your name earlier, their key owns it and your join is refused, so pick
+another. Your key lives at `~/.agentbus/rider-<name>/id_ed25519` — don't delete
+it or you lose the name until the bus restarts. Operators sending under a rider's name must do it from
 the machine holding that key; otherwise pick a different name (for example,
 `<name>-operator`).
 
