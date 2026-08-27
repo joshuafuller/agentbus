@@ -14,6 +14,7 @@ BRANCH="${2:?branch}"
 MODEL="${3:?model}"
 PROMPT_FILE="${4:?prompt file}"
 TIMEOUT="${5:-900}"
+EFFORT="${6:-high}"
 IMAGE="agentbus-codex-agent"
 
 # Seed a throwaway codex home: auth + config only; session state stays
@@ -30,7 +31,7 @@ GIT_EMAIL="$(git config user.email || echo codex-agent@localhost)"
 
 docker run --rm \
   -e GH_TOKEN="$GH_TOKEN" \
-  -e REPO="$REPO" -e BRANCH="$BRANCH" -e MODEL="$MODEL" \
+  -e REPO="$REPO" -e BRANCH="$BRANCH" -e MODEL="$MODEL" -e EFFORT="$EFFORT" \
   -e GIT_NAME="$GIT_NAME" -e GIT_EMAIL="$GIT_EMAIL" \
   -v "$SEED":/seed:ro \
   -v "$(realpath "$PROMPT_FILE")":/prompt.md:ro \
@@ -48,5 +49,6 @@ docker run --rm \
       --skip-git-repo-check \
       --dangerously-bypass-approvals-and-sandbox \
       -m "$MODEL" \
+      -c model_reasoning_effort="$EFFORT" \
       "$(cat /prompt.md)" </dev/null
   '
