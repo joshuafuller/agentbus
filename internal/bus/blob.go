@@ -38,6 +38,20 @@ type BlobHeader struct {
 	Sum   string // sha256 hex of the whole blob
 }
 
+func validBlobID(id string) bool {
+	if len(id) == 0 || len(id) > 64 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') &&
+			(c < '0' || c > '9') && c != '_' && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
 // Encode formats the header frame.
 func (h BlobHeader) Encode() string {
 	return fmt.Sprintf("BLOB H %s %s %d %d %s", h.ID, h.Name, h.Size, h.Total, h.Sum)
@@ -57,10 +71,16 @@ func ParseBlobHeader(line string) (BlobHeader, bool) {
 	if err1 != nil || err2 != nil || size < 0 || total < 1 {
 		return BlobHeader{}, false
 	}
+	if !validBlobID(f[2]) {
+		return BlobHeader{}, false
+	}
 	if !ValidName(f[3]) {
 		return BlobHeader{}, false
 	}
-	if len(f[6]) != 64 {
+	if len(f[6]) != sha256.Size*2 {
+		return BlobHeader{}, false
+	}
+	if _, err := hex.DecodeString(f[6]); err != nil {
 		return BlobHeader{}, false
 	}
 	return BlobHeader{ID: f[2], Name: f[3], Size: size, Total: total, Sum: f[6]}, true

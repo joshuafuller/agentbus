@@ -39,6 +39,22 @@ func TestBlobHeaderRejectsUnsafeName(t *testing.T) {
 	}
 }
 
+func TestBlobHeaderRejectsUnsafeID(t *testing.T) {
+	for _, bad := range []string{"../../outside", "id/../x", "id with spaces", strings.Repeat("a", 65)} {
+		h := BlobHeader{ID: bad, Name: "f.bin", Size: 1, Total: 1, Sum: strings.Repeat("ab", 32)}
+		if _, ok := ParseBlobHeader(h.Encode()); ok {
+			t.Fatalf("unsafe blob ID %q accepted", bad)
+		}
+	}
+}
+
+func TestBlobHeaderRejectsInvalidChecksum(t *testing.T) {
+	h := BlobHeader{ID: "id", Name: "f.bin", Size: 1, Total: 1, Sum: strings.Repeat("g", 64)}
+	if _, ok := ParseBlobHeader(h.Encode()); ok {
+		t.Fatal("non-hex blob checksum accepted")
+	}
+}
+
 func TestBlobChunkRoundTrip(t *testing.T) {
 	raw := []byte("some binary\x00bytes\nwith newline")
 	line := BlobChunk("x7", 2, raw)
