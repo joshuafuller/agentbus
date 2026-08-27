@@ -207,11 +207,12 @@ func runHost(name, onMsg string, sink *bus.Sink) error {
 	// short enough that a renamed rider's spool does not rot forever.
 	if home, err := os.UserHomeDir(); err == nil {
 		spool := bus.NewFileSpool(filepath.Join(home, ".agentbus", "spool"), 24*time.Hour)
-		// Bound disk at startup: expired entries for names that never
-		// rejoined would otherwise wait for a drain that never comes.
-		if err := spool.SweepExpired(); err != nil {
+		// A host serves indefinitely: sweep hourly (and once now) so
+		// entries for names that never rejoin cannot outlive the TTL
+		// until a restart that may never come.
+		defer spool.SweepEvery(time.Hour, func(err error) {
 			fmt.Fprintf(os.Stderr, "agentbus: spool sweep: %v\n", err)
-		}
+		})()
 		hub.Spool = spool
 	} else {
 		fmt.Fprintf(os.Stderr, "agentbus: no home dir (%v) — offline spool disabled\n", err)

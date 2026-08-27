@@ -2,8 +2,10 @@ package task
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/joshuafuller/agentbus/internal/bus"
@@ -76,8 +78,15 @@ type Rider struct {
 	Runner func(prompt string) (string, error) // the wake path (--on-msg)
 	Send   func(line string)                   // writes one line to the bus
 
-	once  sync.Once
-	queue chan queuedTask
+	once    sync.Once
+	queue   chan queuedTask
+	rejects chan rejection
+}
+
+type rejection struct {
+	from  string
+	msg   *a2a.Message
+	cause string
 }
 
 type queuedTask struct {
@@ -99,21 +108,61 @@ func (r *Rider) Handle(from, payload string) bool {
 		return false
 	}
 	r.once.Do(func() {
-		r.queue = make(chan queuedTask, 64)
+		r.queue = make(chan queuedTask, taskQueueDepth)
+		r.rejects = make(chan rejection, taskQueueDepth)
 		go func() {
 			for q := range r.queue {
 				r.run(q.from, q.msg)
+			}
+		}()
+		// Rejections get their own worker: reject writes to disk and
+		// the network, and doing that on the caller — the join read
+		// loop — would stop the rider from reading the bus at exactly
+		// the moment it is overloaded (PR #17 review).
+		go func() {
+			for rej := range r.rejects {
+				r.reject(rej.from, rej.msg, rej.cause)
 			}
 		}()
 	})
 	select {
 	case r.queue <- queuedTask{from: from, msg: msg}:
 	default:
-		// Queue full: refuse loudly rather than block the read loop.
-		// The requester sees the task stuck in nothing — same signal as
-		// a deaf rider, and truthful.
+		// Queue full: refuse VISIBLY — the requester gets a terminal
+		// REJECTED snapshot instead of waiting out its timeout
+		// (PR #15 review). If even the rejection queue is full, the
+		// task is dropped: the requester's timeout is then the truthful
+		// signal that this rider is overwhelmed.
+		select {
+		case r.rejects <- rejection{from: from, msg: msg,
+			cause: "rider task queue full (" + fmt.Sprint(taskQueueDepth) + " pending)"}:
+		default:
+		}
 	}
 	return true
+}
+
+// taskQueueDepth bounds how many tasks may wait behind the one
+// running; past that, new tasks are rejected rather than silently
+// dropped or allowed to block the read loop.
+const taskQueueDepth = 64
+
+// reject persists and reports a task that goes straight from SUBMITTED
+// to REJECTED without ever running.
+func (r *Rider) reject(from string, msg *a2a.Message, cause string) {
+	tk := a2a.NewSubmittedTask(msg, msg)
+	if err := Save(r.Dir, tk); err != nil {
+		return // nothing durable to report; requester sees never-acknowledged
+	}
+	r.Send(bus.Addressed(from, EncodeTask(tk)))
+	now := time.Now().UTC()
+	tk.Status = a2a.TaskStatus{State: a2a.TaskStateRejected,
+		Message:   a2a.NewMessageForTask(a2a.MessageRoleAgent, tk, a2a.NewTextPart(cause)),
+		Timestamp: &now}
+	if err := Save(r.Dir, tk); err != nil {
+		return
+	}
+	r.Send(bus.Addressed(from, EncodeTask(tk)))
 }
 
 func (r *Rider) run(from string, msg *a2a.Message) {

@@ -2,6 +2,7 @@ package bus
 
 import (
 	"bufio"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -342,6 +343,120 @@ func TestConcurrentSendAndJoinNeverStrandsALine(t *testing.T) {
 				}
 				break
 			}
+		}
+	}
+}
+
+// A rider returning to more catch-up than one outbox holds must lose
+// NOTHING: entries leave the spool only once accepted for delivery,
+// the overflow stays spooled, and the connection survives. (PR #15
+// review, P1: Drain deleted everything first, the outbox overflowed,
+// and the excess was gone forever.)
+func TestCatchUpBeyondOutboxLosesNothing(t *testing.T) {
+	h := NewHub("host", nil)
+	h.Spool = NewFileSpool(t.TempDir(), time.Hour)
+	total := outboxDepth + 200
+	for i := 0; i < total; i++ {
+		if err := h.Spool.Add("returning", fmt.Sprintf("[a] m%04d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, rLines := testPeer(t, h, "returning")
+
+	// Throttle: do not read yet. A fast reader empties the outbox as
+	// the drain fills it, so everything fits and overflow is never
+	// exercised. With the reader parked, the outbox fills, the drain
+	// stops at headroom, and the remainder must stay spooled. Wait for
+	// the pending count to stabilize at a nonzero value.
+	prev := -1
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		cur := h.Spool.Pending("returning")
+		if cur > 0 && cur == prev {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("drain never stabilized with a parked reader (pending=%d)", cur)
+		}
+		prev = cur
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// The stall proves overflow really happened; nothing may be lost.
+	if received := h.Spool.Pending("returning"); received == total {
+		t.Fatal("nothing was drained at all")
+	}
+
+	// Now resume reading: the remainder must flow on THIS connection,
+	// in order, with no reconnect — a backlog that only a deliberate
+	// rejoin can collect is a stranding bug (PR #17 review, P1).
+	received := 0
+	overall := time.After(20 * time.Second)
+	for received < total {
+		select {
+		case l, ok := <-rLines:
+			if !ok {
+				t.Fatalf("connection closed during catch-up after %d lines", received)
+			}
+			if !IsNotice(l) {
+				want := fmt.Sprintf("m%04d", received)
+				if l != Message("a", want) {
+					t.Fatalf("line %d out of order: got %q want ...%q", received, l, want)
+				}
+				received++
+			}
+		case <-overall:
+			t.Fatalf("catch-up stalled at %d/%d (pending=%d) — remainder stranded",
+				received, total, h.Spool.Pending("returning"))
+		}
+	}
+	if h.Spool.Pending("returning") != 0 {
+		t.Fatalf("all lines received yet %d still pending", h.Spool.Pending("returning"))
+	}
+}
+
+// While a backlog exists, a live addressed line must queue BEHIND it:
+// otherwise newer tasks execute before older ones. (PR #17 review, P1.)
+func TestLiveLineWaitsBehindBacklog(t *testing.T) {
+	h := NewHub("host", nil)
+	h.Spool = NewFileSpool(t.TempDir(), time.Hour)
+	total := outboxDepth + 100
+	for i := 0; i < total; i++ {
+		if err := h.Spool.Add("returning", fmt.Sprintf("[a] m%04d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sender, _ := testPeer(t, h, "alice")
+	_, rLines := testPeer(t, h, "returning")
+
+	// A live line sent while the backlog is still draining.
+	if _, err := sender.Write([]byte(Addressed("returning", "the live one") + "\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	received := 0
+	sawLive := false
+	overall := time.After(20 * time.Second)
+	for received < total {
+		select {
+		case l, ok := <-rLines:
+			if !ok {
+				t.Fatal("connection closed mid catch-up")
+			}
+			if IsNotice(l) {
+				continue
+			}
+			if l == Message("alice", "the live one") {
+				sawLive = true
+				continue
+			}
+			if sawLive {
+				t.Fatalf("live line overtook backlog: %q arrived after it", l)
+			}
+			received++
+		case <-overall:
+			t.Fatalf("stalled at %d/%d", received, total)
 		}
 	}
 }

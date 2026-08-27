@@ -11,10 +11,15 @@ import (
 )
 
 // Spooler is what the hub needs from a spool: durable per-rider lines,
-// drained in order on rejoin.
+// drained in order on rejoin. Drain hands entries oldest-first to
+// accept and removes each entry only AFTER accept returns true; the
+// first false stops the drain and leaves that entry and everything
+// after it spooled. An entry is therefore never deleted before it has
+// been taken for delivery — a drain that outruns the receiver loses
+// nothing (PR #15 review, P1).
 type Spooler interface {
 	Add(rider, line string) error
-	Drain(rider string) ([]string, error)
+	Drain(rider string, accept func(line string) bool) (delivered, remaining int, err error)
 	Pending(rider string) int
 }
 
@@ -29,8 +34,9 @@ type FileSpool struct {
 	dir string
 	ttl time.Duration
 
-	mu  sync.Mutex
-	seq int // tie-breaker for same-nanosecond adds
+	mu     sync.Mutex
+	seq    int   // tie-breaker for same-stamp adds
+	lastNs int64 // last stamp issued; stamps never go backwards
 }
 
 // NewFileSpool returns a spool rooted at dir. ttl bounds how long an
@@ -50,7 +56,17 @@ func (s *FileSpool) Add(rider, line string) error {
 	}
 	s.mu.Lock()
 	s.seq++
-	name := fmt.Sprintf("%019d-%06d.line", time.Now().UnixNano(), s.seq)
+	// The filename is the sort key, so the stamp must never run
+	// backwards: the wall clock can (NTP step, VM resume), and a
+	// backwards step would scramble drain order mid-stream. Clamp to
+	// strictly increasing within this instance; across restarts the
+	// wall anchor keeps rough order and the TTL its meaning.
+	ns := time.Now().UnixNano()
+	if ns <= s.lastNs {
+		ns = s.lastNs + 1
+	}
+	s.lastNs = ns
+	name := fmt.Sprintf("%019d-%06d.line", ns, s.seq)
 	s.mu.Unlock()
 	tmp := filepath.Join(rdir, name+".tmp")
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -74,26 +90,31 @@ func (s *FileSpool) Add(rider, line string) error {
 	if err := os.Rename(tmp, filepath.Join(rdir, name)); err != nil {
 		return err
 	}
-	if d, err := os.Open(rdir); err == nil {
-		d.Sync()
-		d.Close()
+	// The directory entry must be durable too, and a failure here is
+	// the caller's business: "durably stored" must not be claimed on a
+	// best-effort sync (PR #15 review).
+	d, err := os.Open(rdir)
+	if err != nil {
+		return err
 	}
-	return nil
+	defer d.Close()
+	return d.Sync()
 }
 
-// Drain returns and removes every unexpired spooled line for a rider,
-// oldest first. Expired entries are deleted, not returned.
-func (s *FileSpool) Drain(rider string) ([]string, error) {
+// Drain feeds unexpired spooled lines for a rider to accept, oldest
+// first, removing each file only after accept takes the line. Expired
+// entries are deleted, not offered. The first refusal ends the drain
+// with everything undelivered still on disk.
+func (s *FileSpool) Drain(rider string, accept func(line string) bool) (delivered, remaining int, err error) {
 	rdir, err := s.riderDir(rider)
 	if err != nil {
-		return nil, err
+		return 0, 0, err
 	}
 	names, err := spoolEntries(rdir)
 	if err != nil {
-		return nil, err
+		return 0, 0, err
 	}
-	var lines []string
-	for _, name := range names {
+	for i, name := range names {
 		path := filepath.Join(rdir, name)
 		if s.expired(name) {
 			os.Remove(path)
@@ -101,14 +122,17 @@ func (s *FileSpool) Drain(rider string) ([]string, error) {
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return lines, err
+			return delivered, len(names) - i, err
 		}
-		lines = append(lines, string(data))
+		if !accept(string(data)) {
+			return delivered, len(names) - i, nil
+		}
+		delivered++
 		if err := os.Remove(path); err != nil {
-			return lines, err
+			return delivered, len(names) - i - 1, err
 		}
 	}
-	return lines, nil
+	return delivered, 0, nil
 }
 
 // Pending reports how many lines wait for a rider (expired included —
@@ -123,6 +147,37 @@ func (s *FileSpool) Pending(rider string) int {
 		return 0
 	}
 	return len(names)
+}
+
+// SweepEvery runs SweepExpired now and then again on each interval
+// until the returned stop function is called. A host serves
+// indefinitely, so a startup-only sweep would let entries for
+// never-returning names outlive the TTL until the next restart —
+// which may be never (PR #15 review). onErr, if non-nil, receives
+// every sweep failure: silent sweep failure means silent loss of TTL
+// enforcement (PR #17 review).
+func (s *FileSpool) SweepEvery(interval time.Duration, onErr func(error)) (stop func()) {
+	sweep := func() {
+		if err := s.SweepExpired(); err != nil && onErr != nil {
+			onErr(err)
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		sweep()
+		for {
+			select {
+			case <-t.C:
+				sweep()
+			case <-done:
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
 }
 
 // SweepExpired deletes expired entries for EVERY rider name, so the
@@ -151,8 +206,10 @@ func (s *FileSpool) SweepExpired() error {
 		}
 		remaining := len(names)
 		for _, name := range names {
-			if s.expired(name) {
-				os.Remove(filepath.Join(rdir, name))
+			// Only a Remove that actually succeeded shrinks the count,
+			// so a failed delete never leads to claiming the dir is
+			// empty (PR #15 review).
+			if s.expired(name) && os.Remove(filepath.Join(rdir, name)) == nil {
 				remaining--
 			}
 		}
