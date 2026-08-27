@@ -40,6 +40,7 @@ Usage:
   agentbus host [flags]                 start a bus, print its ticket
   agentbus join <ticket> [flags]        ride the bus (stays connected)
   agentbus send <ticket> [flags] <msg>  send one message and exit
+  agentbus version                      print version information
   agentbus task <ticket> <rider> <msg>  send an A2A task to one rider and
                                         follow it to completion or failure
   agentbus invite <ticket> [flags]      print a copy-paste boarding pass
@@ -101,6 +102,9 @@ func main() {
 		fs.Parse(rest)
 		validateName()
 		err = runSend(ticket, *name, strings.Join(fs.Args(), " "))
+	case "version":
+		fs.Parse(args)
+		printVersion(os.Stdout)
 	case "task":
 		ticket, rest := popTicket(args)
 		timeout := fs.Duration("timeout", 10*time.Minute, "give up if the task has not finished by then")
