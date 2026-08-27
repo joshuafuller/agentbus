@@ -138,6 +138,14 @@ func (h *Hub) deliver(from, text string, via net.Conn) {
 		writeLine(conn, line)
 	}
 	h.mu.Unlock()
+	// The local sink is the host's own participation as the peer named
+	// h.name, so `from != h.name` is its same-name self-filter — the sink
+	// counterpart of the `p.name == from` guard in the peer loop above.
+	// The two paths enforce one invariant (a participant never receives
+	// its own name's messages) via different predicates; they coincide
+	// only because the sink's participant name is h.name. Keep that true:
+	// if the sink is ever given a name distinct from h.name, this guard
+	// must compare against that name instead.
 	if h.sink != nil && from != h.name {
 		h.sink(line)
 	}

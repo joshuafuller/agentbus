@@ -170,6 +170,34 @@ func TestOneshotReceivesNoRelays(t *testing.T) {
 	}
 }
 
+// TestSinkSameNameFilter covers the sink delivery path (distinct from the
+// peer loop): the host's own sink must not receive messages sent under the
+// host's own name, but must receive messages from any other name.
+func TestSinkSameNameFilter(t *testing.T) {
+	sink := make(chan string, 8)
+	h := NewHub("hostname", func(line string) { sink <- line })
+
+	// A oneshot sender under the host's own name: sink must NOT receive it.
+	same := oneshotPeer(t, h, "hostname")
+	if _, err := same.Write([]byte("from myself\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case l := <-sink:
+		t.Fatalf("sink received a same-name message: %q", l)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// A oneshot sender under a different name: sink MUST receive it.
+	other := oneshotPeer(t, h, "somebody")
+	if _, err := other.Write([]byte("from somebody\n")); err != nil {
+		t.Fatal(err)
+	}
+	if l := recvLine(t, sink); l != Message("somebody", "from somebody") {
+		t.Fatalf("sink got %q, want somebody's message", l)
+	}
+}
+
 func TestHostBroadcast(t *testing.T) {
 	h := NewHub("host", nil)
 	_, aLines := testPeer(t, h, "alice")
