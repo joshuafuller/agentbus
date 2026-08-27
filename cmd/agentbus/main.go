@@ -116,7 +116,7 @@ func main() {
 		}
 		runtime := args[0]
 		ticket, rest := popTicket(args[1:])
-		model := fs.String("model", "", "model for the rider's runtime (claude only)")
+		model := fs.String("model", "", "model for the rider's runtime")
 		fs.Parse(rest)
 		err = runWire(runtime, ticket, *name, *model)
 	case "invite":
