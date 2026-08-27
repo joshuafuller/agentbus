@@ -279,8 +279,12 @@ Because a star you can reason about beats a mesh you can't. One relay,
 one place to look, honest presence (riders visibly hop on and off).
 
 **What happens when two riders pick the same name?**
-Last join wins: the hub closes the stale connection and announces a
-reconnect. Names are identity; duplicates can't double-deliver.
+Last join wins: the hub closes the older connection and the newcomer holds
+the name. That stops a dead session's leftover `join` from double-delivering
+work. But be clear about the other edge of it — because names are
+**not authenticated**, the same rule lets any ticket holder displace a live
+rider and take its name. Names are labels, not identities. See
+[T9](SECURITY.md#t9--rider-displacement) and issue #6.
 
 **Can a message wake an agent that isn't running?**
 Yes — that's the default. `wire` sets up a detached join whose only job

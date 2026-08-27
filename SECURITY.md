@@ -49,6 +49,7 @@ Two parties are outside your control:
 | T6 | Oversized-line / flood abuse by a rider | MEDIUM | Partly mitigated — 256 KB line cap; no rate limit yet |
 | T7 | Ticket cannot be rotated or a rider revoked without restarting the host | MEDIUM | Open — see "Rotation & revocation" |
 | T8 | Supply chain: pinned tailcat (no stability promise); installer fetches a release binary | LOW | Pinned versions; installer reviewed before run |
+| T9 | Rider displacement — a ticket holder joins under a live rider's name, evicting it and inheriting its task stream | HIGH | Open; the uniqueness rule that reaps stale wiring also permits takeover while names are unauthenticated. Prevention needs per-rider keys (#6) |
 
 ### T1 — execution is the product
 
@@ -110,6 +111,47 @@ sha, an issue URL, a signature — checkable through an authenticated channel,
 and be judged on reproducible content. Tracked mitigations in issue #3
 (collision warning, rider-vs-oneshot rendering, per-connection id, BOARDING
 norm).
+
+### T9 — rider displacement
+
+T2 is about *claiming* a name in a message. This is about *taking* one.
+
+A rider's name is its identity to the hub, and a new non-oneshot join under
+an existing name supersedes the incumbent: the incumbent's connection is
+closed and the newcomer holds the name. That rule exists for a good reason —
+a dead session's leftover `join` would otherwise keep receiving work, and
+duplicate delivery is a real failure mode. But because names are
+unauthenticated (T2), the rule does not distinguish *a rider coming back*
+from *someone else arriving*.
+
+The consequence, among parties who all legitimately hold the ticket:
+
+- **Task interception.** Work addressed to a rider reaches the displacer
+  instead, while the displaced rider is offline.
+- **Result forgery.** The displacer answers as that rider. Nothing in the
+  bus contradicts it.
+- **Denial of service.** Repeated joins keep a rider permanently evicted.
+
+This is a different property from T1. T1 grants a ticket holder the ability
+to *task* riders and cause code execution, by design. T9 grants the ability
+to **act as another principal**, which the threat model does not otherwise
+give away — and attribution is the substance of the collaboration claim, so
+the ability to become someone else's agent undermines the premise rather
+than only the hardening.
+
+**Prevention is not available today.** Refusing a join that would displace a
+live incumbent breaks the legitimate stale-wiring reconnect the rule exists
+to serve, and a write probe is not a reliable liveness test — a write into a
+half-dead socket's send buffer succeeds. The real fix is per-rider keys and
+signed Agent Cards (#6, ADR 0002): the ticket admits, the key identifies, so
+a returning rider proves itself and an impostor cannot. Until then, treat
+every ticket holder as able to impersonate every rider, and do not put a
+rider on a bus with participants you would not hand that power to.
+
+Found by reading `internal/bus/hub.go` during a design review on
+2026-08-27, not by exploitation against a live bus. Reported privately
+first; opened here once the maintainer confirmed the project has a single
+operator, making disclosure secrecy cost without benefit.
 
 ### Rotation & revocation (T7)
 
