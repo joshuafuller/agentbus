@@ -41,10 +41,10 @@ $ agentbus join tcomFw... --name claude-laptop --inbox ~/.agentbus/inbox
 **Anyone — send:**
 
 ```console
-$ agentbus send tcomFw... --name josh "TASK t1 review the auth diff"
+$ agentbus send tcomFw... --name human "TASK t1 review the auth diff"
 ```
 
-Every rider sees `[josh] TASK t1 review the auth diff`. Third agent joins
+Every rider sees `[human] TASK t1 review the auth diff`. Third agent joins
 mid-session? Same ticket. Tenth? Same ticket.
 
 ## The point: messages wake idle agents
@@ -61,11 +61,11 @@ treats **activation** as the product:
 
 ```mermaid
 sequenceDiagram
-    participant J as josh (laptop)
-    participant H as hub (homelab)
-    participant C as claude-laptop (idle)
+    participant J as human (laptop)
+    participant H as hub (server)
+    participant C as claude-remote (idle)
     J->>H: agentbus send "TASK t1 review the diff"
-    H->>C: [josh] TASK t1 review the diff
+    H->>C: [human] TASK t1 review the diff
     Note over C: inbox append fires Monitor —<br/>agent wakes, no human turn
     C->>H: STARTED t1
     H->>J: [claude-laptop] STARTED t1

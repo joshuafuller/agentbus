@@ -32,6 +32,8 @@ Usage:
   agentbus host [flags]                 start a bus, print its ticket
   agentbus join <ticket> [flags]        ride the bus (stays connected)
   agentbus send <ticket> [flags] <msg>  send one message and exit
+  agentbus invite <ticket> [flags]      print a copy-paste boarding pass
+                                        that onboards a fresh agent
 
 Flags:
   --name <name>     participant name (default: hostname)
@@ -70,6 +72,18 @@ func main() {
 		ticket, rest := popTicket(args)
 		fs.Parse(rest)
 		err = runSend(ticket, *name, strings.Join(fs.Args(), " "))
+	case "invite":
+		ticket, rest := popTicket(args)
+		fs.Parse(rest)
+		// The host's hostname is a bad name for the *invited* agent;
+		// default to "agent" unless --name was given explicitly.
+		inviteName := "agent"
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "name" {
+				inviteName = *name
+			}
+		})
+		err = runInvite(ticket, inviteName)
 	case "help", "--help", "-h":
 		fmt.Print(usage)
 		return
@@ -133,8 +147,10 @@ func runHost(name string, sink *bus.Sink) error {
 	}
 	defer srv.Close()
 
-	fmt.Printf("🚌 the bus is running. your ticket:\n\n  %s\n\n", srv.ConnBlob())
-	fmt.Printf("riders join with: agentbus join <ticket> --name <who>\n\n")
+	ticket := srv.ConnBlob()
+	fmt.Printf("🚌 the bus is running. your ticket:\n\n  %s\n\n", ticket)
+	fmt.Printf("riders join with:    agentbus join <ticket> --name <who>\n")
+	fmt.Printf("onboard a fresh agent: agentbus invite %s --name <who>\n\n", ticket)
 
 	// Host stdin broadcasts as this participant.
 	sc := bufio.NewScanner(os.Stdin)
