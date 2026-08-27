@@ -40,8 +40,24 @@ func LoadOrCreateKey(dir string) (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Exclusive creation: two concurrent first-joins must converge on
+	// ONE key — if the loser overwrote the file after the hub bound the
+	// winner's key, the name would be unclaimable on the next reconnect
+	// for the bus's lifetime (PR #20 review). The loser loads the
+	// winner's key instead.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if os.IsExist(err) {
+		return LoadOrCreateKey(dir)
+	}
+	if err != nil {
+		return nil, err
+	}
 	enc := base64.StdEncoding.EncodeToString(priv.Seed())
-	if err := os.WriteFile(path, []byte(enc+"\n"), 0o600); err != nil {
+	if _, err := f.WriteString(enc + "\n"); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
 		return nil, err
 	}
 	return priv, nil
@@ -100,7 +116,10 @@ func ParseHelloKeyed(line string) (name string, oneshot bool, pub ed25519.Public
 			return "", false, nil, false
 		}
 	}
-	if name == "" || strings.ContainsAny(name, "[] ") {
+	// Full ValidName enforcement at the wire: names reach file paths
+	// (spool, rider dirs) and shell env; a direct-protocol speaker must
+	// not get past what the CLI enforces (PR #20 review).
+	if !ValidName(name) {
 		return "", false, nil, false
 	}
 	return name, oneshot, pub, true
@@ -157,7 +176,12 @@ func PubOf(k ed25519.PrivateKey) ed25519.PublicKey {
 // exists — senders authenticate only when they hold the name's key.
 func LoadKeyIfExists(dir string) (ed25519.PrivateKey, error) {
 	if _, err := os.Stat(filepath.Join(dir, keyFile)); err != nil {
-		return nil, nil
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		// A permission or IO error must surface — silently degrading to
+		// unauthenticated invites confusing refusals later (PR #20).
+		return nil, err
 	}
 	return LoadOrCreateKey(dir)
 }

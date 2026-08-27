@@ -1,8 +1,10 @@
 package bus
 
 import (
+	"crypto/ed25519"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -89,5 +91,67 @@ func TestChallengeLineRoundTrip(t *testing.T) {
 	got, ok := ParseSig(SigLine(sig))
 	if !ok || string(got) != string(sig) {
 		t.Fatal("sig line round trip failed")
+	}
+}
+
+// Two concurrent first-joins racing keygen must converge on ONE key —
+// a lost race that overwrites the persisted key while the hub binds
+// the other would brick the name for the bus's lifetime on the next
+// reconnect. (PR #20 review, P2.)
+func TestConcurrentKeygenConverges(t *testing.T) {
+	dir := t.TempDir()
+	keys := make(chan string, 16)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			k, err := LoadOrCreateKey(dir)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			keys <- string(PubOf(k))
+		}()
+	}
+	wg.Wait()
+	close(keys)
+	first := ""
+	for k := range keys {
+		if first == "" {
+			first = k
+		} else if k != first {
+			t.Fatal("concurrent keygen produced divergent keys")
+		}
+	}
+}
+
+// Only file-absence means "no key": a permission or IO error must be
+// surfaced, not silently degrade to unauthenticated. (PR #20 review.)
+func TestLoadKeyIfExistsPropagatesRealErrors(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := LoadOrCreateKey(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	if _, err := LoadKeyIfExists(dir); err == nil {
+		t.Fatal("permission error silently treated as no-key")
+	}
+	// A genuinely missing key stays the nil/nil case.
+	if k, err := LoadKeyIfExists(t.TempDir()); err != nil || k != nil {
+		t.Fatalf("absent key: k=%v err=%v", k, err)
+	}
+}
+
+func TestParseHelloKeyedEnforcesValidName(t *testing.T) {
+	k := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	for _, bad := range []string{"../evil", "a/b", "name;rm", "a\tb"} {
+		line := HelloKeyed(bad, false, PubOf(k))
+		if _, _, _, ok := ParseHelloKeyed(line); ok {
+			t.Fatalf("unsafe name %q accepted", bad)
+		}
 	}
 }

@@ -38,7 +38,13 @@ func runTask(ticket, name, rider, prompt string, timeout time.Duration) error {
 	rdir, rerr := riderDir(name)
 	var key ed25519.PrivateKey
 	if rerr == nil {
-		key, _ = bus.LoadKeyIfExists(rdir)
+		key, rerr = bus.LoadKeyIfExists(rdir)
+	}
+	if rerr != nil {
+		// A key we cannot read is a setup failure, not license to fall
+		// back to unkeyed mode and get confusing refusals (PR #20).
+		fmt.Fprintf(os.Stderr, "agentbus: rider key: %v\n", rerr)
+		os.Exit(2)
 	}
 	code := runTaskConn(conn, name, rider, prompt, timeout, key, os.Stdout)
 	os.Exit(code)
@@ -186,8 +192,13 @@ func hostSink(rider *task.Rider, sink func(line string) bool, ackLocal func(id s
 				return true
 			}
 			accepted := sink(bus.Message(from, payload))
-			if accepted && envID != "" && ackLocal != nil {
-				ackLocal(envID)
+			if accepted && envID != "" {
+				if seen != nil {
+					seen.Seen(envID) // record only after acceptance
+				}
+				if ackLocal != nil {
+					ackLocal(envID)
+				}
 			}
 			return accepted
 		}
@@ -196,8 +207,13 @@ func hostSink(rider *task.Rider, sink func(line string) bool, ackLocal func(id s
 			out = rendered
 		}
 		accepted := sink(out)
-		if accepted && envID != "" && ackLocal != nil {
-			ackLocal(envID)
+		if accepted && envID != "" {
+			if seen != nil {
+				seen.Seen(envID) // record only after acceptance
+			}
+			if ackLocal != nil {
+				ackLocal(envID)
+			}
 		}
 		return accepted
 	}

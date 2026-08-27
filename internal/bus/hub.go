@@ -148,12 +148,14 @@ func (h *Hub) Serve(conn net.Conn) {
 			return
 		}
 		sig, sok := ParseSig(sc.Text())
+		// The deadline set above stays armed through every refusal
+		// write below: a refused client that stops reading must time
+		// out, not park this goroutine forever (PR #20 review).
 		if !sok || !VerifyChallenge(pub, nonce, name, sig) {
 			fmt.Fprintf(conn, "%s\n", Notice("refused — signature does not prove the presented key"))
 			h.notice(fmt.Sprintf("refused a join as %s: bad signature", name), nil)
 			return
 		}
-		conn.SetDeadline(time.Time{})
 		h.mu.Lock()
 		bound, has := h.bindings[name]
 		switch {
@@ -171,11 +173,14 @@ func (h *Hub) Serve(conn net.Conn) {
 		default:
 			h.mu.Unlock()
 		}
+		conn.SetDeadline(time.Time{}) // handshake passed
 	} else {
 		h.mu.Lock()
 		_, has := h.bindings[name]
 		h.mu.Unlock()
 		if has {
+			// Bounded refusal write, same rationale as above.
+			conn.SetDeadline(time.Now().Add(15 * time.Second))
 			fmt.Fprintf(conn, "%s\n", Notice("refused — "+name+" is key-bound; connect with its key"))
 			h.notice(fmt.Sprintf("refused an unkeyed connection as %s: name is key-bound", name), nil)
 			return

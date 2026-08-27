@@ -318,6 +318,17 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 			Acked: func(id string) { sendLine(bus.Ack(id)) }}
 	}
 
+	sc := bufio.NewScanner(conn)
+	// The hub accepts lines up to 256KB; the default 64KB token limit
+	// would fail a legitimate large task line (PR #20 review). Must be
+	// set before the scanner's first Scan.
+	sc.Buffer(make([]byte, 0, 64*1024), 256*1024)
+	if err := bus.ClientHello(conn, sc, name, false, key); err != nil {
+		return err
+	}
+	// Stdin forwarding starts only AFTER the handshake: a buffered
+	// stdin line sent between HELLO and SIG would be read as handshake
+	// traffic and get the connection refused (PR #20 review, P1).
 	go func() {
 		sc := bufio.NewScanner(os.Stdin)
 		for sc.Scan() {
@@ -326,11 +337,6 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 			}
 		}
 	}()
-
-	sc := bufio.NewScanner(conn)
-	if err := bus.ClientHello(conn, sc, name, false, key); err != nil {
-		return err
-	}
 	// At-least-once delivery: the hub redelivers unACKed envelopes, so
 	// remember recent ids and re-ACK duplicates without reprocessing.
 	seen := bus.NewDedup(1024)
@@ -356,18 +362,23 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 						continue
 					}
 				}
-				if seen.Seen(id) {
+				if seen.Has(id) {
 					sendLine(bus.Ack(id)) // duplicate chat: re-ACK, don't reprocess
 					continue
 				}
+				// Record the id only AFTER acceptance: marking first
+				// would turn a failed delivery's redelivery into an
+				// ACKed no-op — zero deliveries (PR #21 review).
 				plain := bus.Message(from, payload)
 				if rider != nil {
 					if sink.Deliver(plain) {
+						seen.Seen(id)
 						sendLine(bus.Ack(id)) // accepted: inbox append is synchronous
 					}
 					continue
 				}
 				if sink.Deliver(driverLine(plain)) {
+					seen.Seen(id)
 					sendLine(bus.Ack(id))
 				}
 				continue
