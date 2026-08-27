@@ -21,7 +21,7 @@ PROMPT_FILE="${4:?prompt file}"
 TIMEOUT="${5:-900}"
 EFFORT="${6:-high}"
 IMAGE="agentbus-codex-agent"
-CONTAINER="agentbus-agent-$(echo "$BRANCH" | tr '/' '-')"
+CONTAINER="agentbus-agent-$(printf '%s' "$BRANCH" | sed 's/[^a-zA-Z0-9_.-]/-/g')"
 
 # Seed a throwaway codex home: auth + config only; session state stays
 # in the container and dies with it.
