@@ -1,8 +1,10 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestClaudeOnMsgPromptViaStdin guards issue #1: --allowedTools is variadic,
@@ -37,6 +39,43 @@ func TestClaudeOnMsgModel(t *testing.T) {
 	}
 }
 
+// wire must not report success until one probe has actually run
+// through the real wake command and produced an answer: "welcome
+// aboard" only proves the bus link, and the original deaf-rider
+// incident (#1, #8) was a malformed wake command behind a healthy
+// join. (Issue #8, item 1.)
+func TestSelfTestPassesWorkingCommand(t *testing.T) {
+	if err := selfTest(`printf 'OK %s' "$AGENTBUS_MSG"`); err != nil {
+		t.Fatalf("working wake command failed self-test: %v", err)
+	}
+}
+
+func TestSelfTestFailsBrokenCommand(t *testing.T) {
+	if err := selfTest(`exit 7`); err == nil {
+		t.Fatal("broken wake command passed self-test")
+	}
+}
+
+// A wake command that hangs (stdin, network) must fail the self-test
+// within its deadline instead of hanging wire forever. (PR #19 review.)
+func TestSelfTestTimesOutHangingCommand(t *testing.T) {
+	start := time.Now()
+	if err := selfTestWithTimeout(`sleep 30`, 300*time.Millisecond); err == nil {
+		t.Fatal("hanging wake command passed self-test")
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("self-test took %v; the deadline did not bound it", d)
+	}
+}
+
+func TestSelfTestFailsSilentCommand(t *testing.T) {
+	// Exit 0 with no output is the deaf shape: the command "ran" but
+	// no turn produced anything — wire must not call that wired.
+	if err := selfTest(`true`); err == nil {
+		t.Fatal("silent wake command passed self-test")
+	}
+}
+
 func TestCodexOnMsg(t *testing.T) {
 	cmd := codexOnMsg("/home/u/.agentbus/rider-y", "01a0-abcd", "")
 	if !strings.Contains(cmd, "codex exec resume 01a0-abcd") {
@@ -58,5 +97,20 @@ func TestCodexOnMsgModel(t *testing.T) {
 	cmd := codexOnMsg("/d", "01a0-abcd", "gpt-5.6-luna")
 	if !strings.Contains(cmd, "codex exec resume 01a0-abcd -m gpt-5.6-luna") {
 		t.Errorf("model not passed to resume: %q", cmd)
+	}
+}
+
+// The rider home is neither a git repo nor a codex-trusted directory;
+// without this flag codex exec refuses (current versions) or wedges
+// (headless stdin). Both the bootstrap and every resume need it.
+func TestCodexCommandsSkipGitRepoCheck(t *testing.T) {
+	if cmd := codexOnMsg("/d", "01a0-abcd", ""); !strings.Contains(cmd, "--skip-git-repo-check") {
+		t.Errorf("resume lacks --skip-git-repo-check: %q", cmd)
+	}
+	if args := codexBootArgs("hello briefing", ""); !slices.Contains(args, "--skip-git-repo-check") {
+		t.Errorf("bootstrap lacks --skip-git-repo-check: %v", args)
+	}
+	if args := codexBootArgs("hello", "gpt-5.6-luna"); !slices.Contains(args, "-m") || !slices.Contains(args, "gpt-5.6-luna") {
+		t.Errorf("bootstrap lacks model args: %v", args)
 	}
 }

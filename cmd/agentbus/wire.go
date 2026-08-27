@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -47,7 +48,65 @@ func codexOnMsg(dir, sessionID, model string) string {
 	if model != "" {
 		modelFlag = " -m " + model
 	}
-	return fmt.Sprintf(`cd %s && codex exec resume %s%s "$AGENTBUS_MSG"`, dir, sessionID, modelFlag)
+	// --skip-git-repo-check: the rider home is not a git repo and codex
+	// exec otherwise refuses (or, headless, wedges on stdin).
+	return fmt.Sprintf(`cd %s && codex exec resume %s%s --skip-git-repo-check "$AGENTBUS_MSG"`, dir, sessionID, modelFlag)
+}
+
+// codexBootArgs builds the argument list for the rider's bootstrap
+// codex invocation.
+func codexBootArgs(briefing, model string) []string {
+	args := []string{"exec", "--skip-git-repo-check", briefing}
+	if model != "" {
+		args = append(args, "-m", model)
+	}
+	return args
+}
+
+// selfTest proves the wake command actually works before wire reports
+// success: it runs ONE probe message through the exact --on-msg the
+// join will use and requires a non-empty answer. "welcome aboard" only
+// proves the bus link; the original deaf-rider incident was a
+// malformed wake command behind a perfectly healthy join (issues #1,
+// #8). Costs one model turn at wire time — the cheapest moment to
+// find out, in front of the person who can fix it.
+func selfTest(onMsg string) error {
+	// Generous deadline: a model turn can take a couple of minutes, but
+	// a wake command parked on stdin or a dead network must fail fast
+	// rather than hang wire forever (PR #19 review).
+	return selfTestWithTimeout(onMsg, 5*time.Minute)
+}
+
+func selfTestWithTimeout(onMsg string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	// The probe only requires that SOME answer comes back — model
+	// output framing varies by runtime, so the prompt matches the
+	// check: any brief reply proves the wake path is alive.
+	probe := "wire self-test: reply briefly to confirm you are awake"
+	cmd := exec.CommandContext(ctx, "sh", "-c", onMsg)
+	// Kill the whole process GROUP on deadline: the context alone only
+	// kills sh, and a surviving grandchild holding the stdout pipe
+	// would block Wait for its full runtime anyway. WaitDelay backstops
+	// any straggler still holding the pipe after the kill.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Env = append(os.Environ(), "AGENTBUS_MSG="+probe, "AGENTBUS_TEXT="+probe)
+	var out strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("wake command did not answer within %s — it may be blocked on stdin or the network", timeout)
+	}
+	if err != nil {
+		return fmt.Errorf("wake command failed its self-test: %w", err)
+	}
+	if strings.TrimSpace(out.String()) == "" {
+		return fmt.Errorf("wake command ran but produced no answer — the rider would be deaf")
+	}
+	return nil
 }
 
 // runWire sets up the complete wake wiring for a runtime: bootstrap a
@@ -95,10 +154,7 @@ func runWire(runtime, ticket, name, model string) error {
 		onMsg = claudeOnMsg(dir, model)
 	case "codex":
 		fmt.Fprintf(os.Stderr, "wiring %s: creating rider session in %s...\n", name, dir)
-		boot := exec.Command("codex", "exec", briefing(ticket, name))
-		if model != "" {
-			boot.Args = append(boot.Args, "-m", model)
-		}
+		boot := exec.Command("codex", codexBootArgs(briefing(ticket, name), model)...)
 		boot.Dir = dir
 		out, err := boot.CombinedOutput()
 		if err != nil {
@@ -111,6 +167,13 @@ func runWire(runtime, ticket, name, model string) error {
 		onMsg = codexOnMsg(dir, string(m[1]), model)
 	default:
 		return fmt.Errorf("unknown runtime %q (want claude or codex)", runtime)
+	}
+
+	// Prove the wake path before wiring anything to it (issue #8): one
+	// probe turn through the real command, requiring a real answer.
+	fmt.Fprintf(os.Stderr, "wiring %s: self-testing the wake command (one probe turn)...\n", name)
+	if err := selfTest(onMsg); err != nil {
+		return fmt.Errorf("%s is NOT wired — %w\nwake command was: %s", name, err, onMsg)
 	}
 
 	logPath := filepath.Join(dir, "join.log")
