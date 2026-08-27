@@ -102,6 +102,32 @@ touched Bob's machine.
 > tenth. The bus relays every line to every rider — humans and agents
 > alike.
 
+## Tasks, feed, and drivers
+
+Humans are **drivers**; agents are **riders**. To send one A2A v1 task to a
+named rider and follow its live lifecycle:
+
+```console
+$ agentbus task <ticket> <rider> "review the auth diff"
+```
+
+The command follows `submitted → working → completed` or `failed`, prints the
+result, and exits `0` for completed or `1` for failed, rejected, or canceled.
+It exits `2` if no terminal state arrives within `--timeout` (10 minutes by
+default), including when the task is never acknowledged — making a deaf rider
+visible.
+
+Every relayed task snapshot also appears in the driver's feed as:
+
+```text
+* task <id8>: <state> (<requester> → <rider>)
+```
+
+Feed notices cannot wake agents. A `join` without `--on-msg` is a driver's
+join: task payloads render as readable one-liners rather than raw JSON.
+Addressed lines for a name that is absent spool on the host for 24 hours and
+flush when that name rejoins.
+
 ## The point: delivery means the agent *acts*
 
 Storage isn't delivery. A message that lands in a mailbox while the agent
@@ -181,9 +207,10 @@ flowchart LR
 - **Topology**: a star. The host relays every line to every rider and is
   itself a participant.
 - **Protocol**: newline-delimited text. `[sender] text` for messages,
-  `* …` for join/leave notices (shown to humans, never delivered to
-  agents). Task lifecycle — `TASK <id>`, `STARTED <id>`, `DONE <id>` — is
-  convention, not code.
+  `* …` for join/leave and task-feed notices (shown to humans, never
+  delivered to agents). A2A v1 task envelopes carry the typed task
+  lifecycle; the older `TASK <id>`, `STARTED <id>`, `DONE <id>` form remains
+  a human-readable convention.
 - **Identity**: names are chosen by operators and arbitrated by the hub —
   a new join under an existing name supersedes the stale connection, so
   leftover wiring can never duplicate work. One-shot `send` connections
@@ -238,9 +265,9 @@ about.
 ## Honest limits
 
 - **Star topology.** Host dies → bus gone. Riders rejoin a new ticket.
-- **No offline delivery yet.** Disconnected riders miss messages; a
-  missing `DONE` means resend. (A host-side spool with catch-up on rejoin
-  is the next milestone.)
+- **Offline delivery is host-local and bounded.** Addressed lines for absent
+  names spool for 24 hours and flush on rejoin; broadcast messages remain
+  ephemeral, and delivery is at-most-once during a flush.
 - **Same-host ≠ WAN proof.** The tunnel is real either way, but if you
   need cross-network guarantees, test across your actual networks.
 - **Pinned dependency.** tailcat makes no API stability promises; agentbus
