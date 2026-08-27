@@ -15,6 +15,15 @@ func TestDedupSeenOnceOnly(t *testing.T) {
 	}
 }
 
+func TestDedupSurvivesNonPositiveCapacity(t *testing.T) {
+	// A zero/negative capacity must not panic Seen. (PR #18 review.)
+	for _, n := range []int{0, -3} {
+		d := NewDedup(n)
+		d.Seen("a")
+		d.Seen("b") // would panic on evict-from-empty before the guard
+	}
+}
+
 func TestDedupEvictsOldestBeyondCapacity(t *testing.T) {
 	d := NewDedup(3)
 	for i := 0; i < 4; i++ {

@@ -116,7 +116,13 @@ until then the pump redelivers it (after the retry interval, or on
 rejoin), so delivery is **at-least-once** and receivers drop duplicate
 ids they have already processed (re-ACKing them). A rider ACKs a task
 envelope only after the SUBMITTED snapshot is persisted — durable
-acceptance, never "parsed" or "buffered in memory". When the target
+acceptance, never "parsed" or "buffered in memory". Host-addressed lines follow the same contract: spooled first,
+delivered to the host's sink as envelopes, forgotten only when the
+host durably accepts (tasks: after the SUBMITTED persist; chat: after
+the inbox append succeeds), re-offered at the next start otherwise.
+Riders keep a durable record of accepted envelope ids (acked.log in
+the rider home), so a crash between persist and ACK re-ACKs on
+redelivery instead of re-executing the task. When the target
 holds no connection the hub announces `* <name> is away — line spooled
 (<n> pending)`; with no spool configured the hub says the line was
 dropped instead. Only addressed lines spool: broadcast is the

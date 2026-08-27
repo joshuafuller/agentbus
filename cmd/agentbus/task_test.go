@@ -114,8 +114,8 @@ func TestHostSinkRoutesTasksToRider(t *testing.T) {
 		Runner: func(prompt string) (string, error) { ran <- prompt; return "done", nil },
 		Send:   func(string) {},
 	}
-	sink := func(line string) { delivered <- line }
-	route := hostSink(r, sink)
+	sink := func(line string) bool { delivered <- line; return true }
+	route := hostSink(r, sink, nil, bus.NewDedup(64))
 
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("host task"))
 	route(bus.Message("alice", task.EncodeMessage(msg)))
@@ -143,7 +143,7 @@ func TestHostSinkRoutesTasksToRider(t *testing.T) {
 
 func TestHostSinkRendersForDriverHost(t *testing.T) {
 	delivered := make(chan string, 2)
-	route := hostSink(nil, func(line string) { delivered <- line })
+	route := hostSink(nil, func(line string) bool { delivered <- line; return true }, nil, bus.NewDedup(64))
 
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("x"))
 	tk := a2a.NewSubmittedTask(msg, msg)

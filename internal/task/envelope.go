@@ -3,6 +3,8 @@ package task
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -87,13 +89,27 @@ type Rider struct {
 	once    sync.Once
 	queue   chan queuedTask
 	rejects chan rejection
+
+	// Envelope-acceptance state (PR #18 review, both P1s): `accepted`
+	// mirrors Dir/acked.log — envelope ids whose task reached a durable
+	// state — and survives restarts, so a crash between persist and ACK
+	// re-ACKs instead of re-executing. `pending` are ids enqueued but
+	// not yet persisted: their redeliveries are ignored WITHOUT an ACK,
+	// since acking would let the hub delete its only durable copy.
+	stateMu  sync.Mutex
+	accepted map[string]bool
+	pending  map[string]bool
 }
 
 type rejection struct {
 	from  string
+	envID string
 	msg   *a2a.Message
 	cause string
 }
+
+// ackedLog is the append-only record of durably accepted envelope ids.
+const ackedLog = "acked.log"
 
 type queuedTask struct {
 	from  string
@@ -124,6 +140,15 @@ func (r *Rider) HandleEnveloped(from, envID, payload string) bool {
 	r.once.Do(func() {
 		r.queue = make(chan queuedTask, taskQueueDepth)
 		r.rejects = make(chan rejection, taskQueueDepth)
+		r.accepted = make(map[string]bool)
+		r.pending = make(map[string]bool)
+		// Recover the accepted set: ids in the log were persisted before
+		// a crash, and their redeliveries must re-ACK, never re-run.
+		if data, err := os.ReadFile(filepath.Join(r.Dir, ackedLog)); err == nil {
+			for _, id := range strings.Fields(string(data)) {
+				r.accepted[id] = true
+			}
+		}
 		go func() {
 			for q := range r.queue {
 				r.run(q.from, q.envID, q.msg)
@@ -135,25 +160,68 @@ func (r *Rider) HandleEnveloped(from, envID, payload string) bool {
 		// the moment it is overloaded (PR #17 review).
 		go func() {
 			for rej := range r.rejects {
-				r.reject(rej.from, rej.msg, rej.cause)
+				r.reject(rej.from, rej.envID, rej.msg, rej.cause)
 			}
 		}()
 	})
+	if envID != "" {
+		r.stateMu.Lock()
+		if r.accepted[envID] {
+			r.stateMu.Unlock()
+			if r.Acked != nil {
+				r.Acked(envID) // duplicate of durably accepted work: re-ACK only
+			}
+			return true
+		}
+		if r.pending[envID] {
+			r.stateMu.Unlock()
+			return true // already queued, not yet durable: no ACK, no dup run
+		}
+		r.pending[envID] = true
+		r.stateMu.Unlock()
+	}
 	select {
 	case r.queue <- queuedTask{from: from, envID: envID, msg: msg}:
 	default:
 		// Queue full: refuse VISIBLY — the requester gets a terminal
 		// REJECTED snapshot instead of waiting out its timeout
 		// (PR #15 review). If even the rejection queue is full, the
-		// task is dropped: the requester's timeout is then the truthful
-		// signal that this rider is overwhelmed.
+		// task is dropped — clear pending so a later redelivery can
+		// retry; the requester's timeout is the truthful overload
+		// signal meanwhile.
 		select {
-		case r.rejects <- rejection{from: from, msg: msg,
+		case r.rejects <- rejection{from: from, envID: envID, msg: msg,
 			cause: "rider task queue full (" + fmt.Sprint(taskQueueDepth) + " pending)"}:
 		default:
+			if envID != "" {
+				r.stateMu.Lock()
+				delete(r.pending, envID)
+				r.stateMu.Unlock()
+			}
 		}
 	}
 	return true
+}
+
+// markAccepted durably records an envelope id as accepted (append +
+// fsync to acked.log), then ACKs it. Called only after the task has
+// reached a durable state on disk.
+func (r *Rider) markAccepted(envID string) {
+	if envID == "" {
+		return
+	}
+	if f, err := os.OpenFile(filepath.Join(r.Dir, ackedLog), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+		fmt.Fprintln(f, envID)
+		f.Sync()
+		f.Close()
+	}
+	r.stateMu.Lock()
+	r.accepted[envID] = true
+	delete(r.pending, envID)
+	r.stateMu.Unlock()
+	if r.Acked != nil {
+		r.Acked(envID)
+	}
 }
 
 // taskQueueDepth bounds how many tasks may wait behind the one
@@ -163,7 +231,7 @@ const taskQueueDepth = 64
 
 // reject persists and reports a task that goes straight from SUBMITTED
 // to REJECTED without ever running.
-func (r *Rider) reject(from string, msg *a2a.Message, cause string) {
+func (r *Rider) reject(from, envID string, msg *a2a.Message, cause string) {
 	tk := a2a.NewSubmittedTask(msg, msg)
 	if err := Save(r.Dir, tk); err != nil {
 		return // nothing durable to report; requester sees never-acknowledged
@@ -176,6 +244,9 @@ func (r *Rider) reject(from string, msg *a2a.Message, cause string) {
 	if err := Save(r.Dir, tk); err != nil {
 		return
 	}
+	// The rejection is durable: accept the envelope so the hub stops
+	// redelivering a task this rider has already refused on the record.
+	r.markAccepted(envID)
 	r.Send(bus.Addressed(from, EncodeTask(tk)))
 }
 
@@ -184,10 +255,11 @@ func (r *Rider) run(from, envID string, msg *a2a.Message) {
 	acked := false
 	notify := func(snap *a2a.Task) {
 		// The first notify fires after the SUBMITTED snapshot's Save:
-		// the task is durable, so the envelope may be acknowledged and
-		// the hub may forget its spooled copy.
-		if !acked && envID != "" && r.Acked != nil {
-			r.Acked(envID)
+		// the task is durable, so the envelope is recorded as accepted
+		// (durably, surviving restarts) and acknowledged — the hub may
+		// then forget its spooled copy.
+		if !acked {
+			r.markAccepted(envID)
 		}
 		acked = true
 		r.Send(bus.Addressed(from, EncodeTask(snap)))

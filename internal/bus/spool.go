@@ -18,7 +18,7 @@ import (
 // been taken for delivery — a drain that outruns the receiver loses
 // nothing (PR #15 review, P1).
 type Spooler interface {
-	Add(rider, line string) error
+	Add(rider, line string) (id string, err error)
 	// Offer feeds entries oldest-first without removing them; Remove is
 	// the ACK. See FileSpool.Offer / FileSpool.Remove.
 	Offer(rider string, accept func(id, line string) bool) error
@@ -49,14 +49,15 @@ func NewFileSpool(dir string, ttl time.Duration) *FileSpool {
 	return &FileSpool{dir: dir, ttl: ttl}
 }
 
-// Add durably stores one line for a rider that is not connected.
-func (s *FileSpool) Add(rider, line string) error {
+// Add durably stores one line for a rider that is not connected,
+// returning the entry id (the token an ACK must carry).
+func (s *FileSpool) Add(rider, line string) (string, error) {
 	rdir, err := s.riderDir(rider)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := os.MkdirAll(rdir, 0o700); err != nil {
-		return err
+		return "", err
 	}
 	s.mu.Lock()
 	s.seq++
@@ -75,34 +76,37 @@ func (s *FileSpool) Add(rider, line string) error {
 	tmp := filepath.Join(rdir, name+".tmp")
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if _, err := f.WriteString(line); err != nil {
 		f.Close()
-		return err
+		return "", err
 	}
 	// The spool's one job is surviving a host crash: fsync the entry
 	// before the rename, and the directory after, or "durably stored"
 	// is only a page-cache promise (PR #14 review).
 	if err := f.Sync(); err != nil {
 		f.Close()
-		return err
+		return "", err
 	}
 	if err := f.Close(); err != nil {
-		return err
+		return "", err
 	}
 	if err := os.Rename(tmp, filepath.Join(rdir, name)); err != nil {
-		return err
+		return "", err
 	}
 	// The directory entry must be durable too, and a failure here is
 	// the caller's business: "durably stored" must not be claimed on a
 	// best-effort sync (PR #15 review).
 	d, err := os.Open(rdir)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer d.Close()
-	return d.Sync()
+	if err := d.Sync(); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(name, ".line"), nil
 }
 
 // Drain feeds unexpired spooled lines for a rider to accept, oldest

@@ -14,6 +14,9 @@ type Dedup struct {
 
 // NewDedup returns a dedup window remembering the last n ids.
 func NewDedup(n int) *Dedup {
+	if n < 1 {
+		n = 1 // a non-positive window would panic the eviction path
+	}
 	return &Dedup{seen: make(map[string]bool, n), cap: n}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -60,7 +61,7 @@ func recvMessage(t *testing.T, ch chan string) string {
 
 func TestThreePeersRelay(t *testing.T) {
 	sink := make(chan string, 8)
-	h := NewHub("host", func(line string) { sink <- line })
+	h := NewHub("host", func(line string) bool { sink <- line; return true })
 
 	a, aLines := testPeer(t, h, "alice")
 	_, bLines := testPeer(t, h, "bob")
@@ -93,7 +94,7 @@ func TestThreePeersRelay(t *testing.T) {
 
 func TestAddressedLineReachesOnlyTarget(t *testing.T) {
 	sink := make(chan string, 8)
-	h := NewHub("host", func(line string) { sink <- line })
+	h := NewHub("host", func(line string) bool { sink <- line; return true })
 
 	a, _ := testPeer(t, h, "alice")
 	_, bLines := testPeer(t, h, "bob")
@@ -123,7 +124,7 @@ func TestAddressedLineReachesOnlyTarget(t *testing.T) {
 
 func TestAddressedLineToHostReachesSinkOnly(t *testing.T) {
 	sink := make(chan string, 8)
-	h := NewHub("host", func(line string) { sink <- line })
+	h := NewHub("host", func(line string) bool { sink <- line; return true })
 
 	a, _ := testPeer(t, h, "alice")
 	_, bLines := testPeer(t, h, "bob")
@@ -305,6 +306,68 @@ func TestCrashBeforeAckRedeliversOnRejoin(t *testing.T) {
 	}
 }
 
+// Host-addressed lines get the same durable-first contract as remote
+// riders: spooled before the sink sees them (enveloped), forgotten
+// only on AckLocal, and redeliverable via DrainLocal. Previously they
+// bypassed the spool entirely — a host crash before the wake worker
+// persisted lost the task with no copy anywhere. (PR #18 review, P1.)
+func TestHostAddressedIsDurableUntilLocalAck(t *testing.T) {
+	sunk := make(chan string, 8)
+	h := NewHub("host", func(line string) bool { sunk <- line; return true })
+	h.Spool = NewFileSpool(t.TempDir(), time.Hour)
+	a, _ := testPeer(t, h, "alice")
+
+	if _, err := a.Write([]byte(Addressed("host", "A2A-MSG for-the-host") + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	select {
+	case l := <-sunk:
+		from, body, _ := ParseMessage(l)
+		var ok bool
+		id, _, ok = ParseEnvelope(body)
+		if !ok || from != "alice" {
+			t.Fatalf("host sink got unenveloped %q", l)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("host sink never received the line")
+	}
+	if n := h.Spool.Pending("host"); n != 1 {
+		t.Fatalf("host entry not retained pre-ack (pending=%d)", n)
+	}
+	h.AckLocal(id)
+	if n := h.Spool.Pending("host"); n != 0 {
+		t.Fatalf("AckLocal did not clear the entry (pending=%d)", n)
+	}
+}
+
+func TestDrainLocalRedeliversUnacked(t *testing.T) {
+	var accept atomic.Bool
+	sunk := make(chan string, 8)
+	h := NewHub("host", func(line string) bool { sunk <- line; return accept.Load() })
+	h.Spool = NewFileSpool(t.TempDir(), time.Hour)
+	a, _ := testPeer(t, h, "alice")
+
+	a.Write([]byte(Addressed("host", "survive the host crash") + "\n"))
+	<-sunk // first attempt, refused (accept=false); entry must remain
+	if n := h.Spool.Pending("host"); n != 1 {
+		t.Fatalf("refused delivery cleared the entry (pending=%d)", n)
+	}
+
+	// "Restart": DrainLocal re-offers; this time the sink accepts.
+	accept.Store(true)
+	h.DrainLocal()
+	select {
+	case l := <-sunk:
+		_, body, _ := ParseMessage(l)
+		if _, p, ok := ParseEnvelope(body); !ok || p != "survive the host crash" {
+			t.Fatalf("redelivery mangled: %q", l)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("DrainLocal did not redeliver")
+	}
+}
+
 // The Gate 3 contract: an addressed line to a rider that is not
 // connected is durably spooled — with a visible notice, never a silent
 // drop — and flushed in order when that name joins.
@@ -450,7 +513,7 @@ func TestCatchUpBeyondOutboxLosesNothing(t *testing.T) {
 	h.Spool = NewFileSpool(t.TempDir(), time.Hour)
 	total := outboxDepth + 200
 	for i := 0; i < total; i++ {
-		if err := h.Spool.Add("returning", fmt.Sprintf("[a] m%04d", i)); err != nil {
+		if _, err := h.Spool.Add("returning", fmt.Sprintf("[a] m%04d", i)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -512,7 +575,7 @@ func TestLiveLineWaitsBehindBacklog(t *testing.T) {
 	h.Spool = NewFileSpool(t.TempDir(), time.Hour)
 	total := outboxDepth + 100
 	for i := 0; i < total; i++ {
-		if err := h.Spool.Add("returning", fmt.Sprintf("[a] m%04d", i)); err != nil {
+		if _, err := h.Spool.Add("returning", fmt.Sprintf("[a] m%04d", i)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -658,7 +721,7 @@ func TestOneshotReceivesNoRelays(t *testing.T) {
 // host's own name, but must receive messages from any other name.
 func TestSinkSameNameFilter(t *testing.T) {
 	sink := make(chan string, 8)
-	h := NewHub("hostname", func(line string) { sink <- line })
+	h := NewHub("hostname", func(line string) bool { sink <- line; return true })
 
 	// A oneshot sender under the host's own name: sink must NOT receive it.
 	same := oneshotPeer(t, h, "hostname")

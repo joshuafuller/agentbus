@@ -139,27 +139,48 @@ func driverLine(line string) string {
 // requests addressed to the host run through the lifecycle instead of
 // leaking raw JSON into the wake command; without one, the host is a
 // driver and task payloads render readable. Chat passes to the sink
-// either way.
-func hostSink(rider *task.Rider, sink func(line string)) func(line string) {
-	return func(line string) {
-		from, payload, ok := bus.ParseMessage(line)
+// either way. Host-addressed lines arrive ENVELOPED from the hub
+// (durable-first, PR #18 review): tasks ACK via ackLocal after the
+// SUBMITTED persist (wired through Rider.Acked by the caller), chat
+// ACKs after the sink accepts; a refusal leaves the entry spooled for
+// DrainLocal. The returned bool reports sink-level acceptance.
+func hostSink(rider *task.Rider, sink func(line string) bool, ackLocal func(id string), seen *bus.Dedup) func(line string) bool {
+	return func(line string) bool {
+		from, body, ok := bus.ParseMessage(line)
 		if !ok {
-			sink(line)
-			return
+			return sink(line)
+		}
+		payload := body
+		envID := ""
+		if id, p, isEnv := bus.ParseEnvelope(body); isEnv {
+			envID, payload = id, p
+			if seen != nil && seen.Seen(envID) {
+				if ackLocal != nil {
+					ackLocal(envID)
+				}
+				return true
+			}
 		}
 		if rider != nil {
 			if _, isTask := task.DecodeMessage(payload); isTask {
-				rider.Handle(from, payload)
-				return
+				rider.HandleEnveloped(from, envID, payload)
+				return true
 			}
-			sink(line)
-			return
+			accepted := sink(bus.Message(from, payload))
+			if accepted && envID != "" && ackLocal != nil {
+				ackLocal(envID)
+			}
+			return accepted
 		}
+		out := bus.Message(from, payload)
 		if rendered, ok := task.RenderLine(from, payload); ok {
-			sink(rendered)
-			return
+			out = rendered
 		}
-		sink(line)
+		accepted := sink(out)
+		if accepted && envID != "" && ackLocal != nil {
+			ackLocal(envID)
+		}
+		return accepted
 	}
 }
 

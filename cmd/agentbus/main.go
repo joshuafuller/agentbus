@@ -195,9 +195,11 @@ func runHost(name, onMsg string, sink *bus.Sink) error {
 			return err
 		}
 		hostRider = &task.Rider{Dir: dir, Runner: execRunner(onMsg),
-			Send: func(line string) { hub.Broadcast(line) }}
+			Send:  func(line string) { hub.Broadcast(line) },
+			Acked: func(id string) { hub.AckLocal(id) }}
 	}
-	hub = bus.NewHub(name, hostSink(hostRider, sink.Deliver))
+	hub = bus.NewHub(name, hostSink(hostRider, sink.Deliver,
+		func(id string) { hub.AckLocal(id) }, bus.NewDedup(1024)))
 	hub.OnNotice = func(line string) { fmt.Println(line) }
 	// Task lifecycle transitions become feed notices every driver sees
 	// (issue #12). Injected here because bus cannot import task.
@@ -214,6 +216,9 @@ func runHost(name, onMsg string, sink *bus.Sink) error {
 			fmt.Fprintf(os.Stderr, "agentbus: spool sweep: %v\n", err)
 		})()
 		hub.Spool = spool
+		// The host's own catch-up: redeliver unacked host-addressed
+		// entries from before the restart.
+		hub.DrainLocal()
 	} else {
 		fmt.Fprintf(os.Stderr, "agentbus: no home dir (%v) — offline spool disabled\n", err)
 	}
@@ -328,12 +333,14 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 						rider.HandleEnveloped(from, id, payload)
 						continue
 					}
-					sink.Deliver(plain)
-					sendLine(bus.Ack(id)) // durable: inbox append is synchronous
+					if sink.Deliver(plain) {
+						sendLine(bus.Ack(id)) // accepted: inbox append is synchronous
+					}
 					continue
 				}
-				sink.Deliver(driverLine(plain))
-				sendLine(bus.Ack(id))
+				if sink.Deliver(driverLine(plain)) {
+					sendLine(bus.Ack(id))
+				}
 				continue
 			}
 		}

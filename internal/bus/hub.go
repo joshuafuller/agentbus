@@ -13,8 +13,8 @@ import (
 // other peer (by name, so a peer's send and receive connections under
 // the same name never echo back) and to the local sink.
 type Hub struct {
-	name string            // the host's own participant name
-	sink func(line string) // local delivery of message lines; may be nil
+	name string                 // the host's own participant name
+	sink func(line string) bool // local delivery; reports acceptance; may be nil
 
 	// OnNotice, if non-nil, receives system notice lines (joins and
 	// leaves) for local display. Kept separate from sink so notices are
@@ -67,7 +67,7 @@ type peer struct {
 
 // NewHub returns a hub for a host participating under name.
 // sink, if non-nil, receives every relayed message line (never notices).
-func NewHub(name string, sink func(line string)) *Hub {
+func NewHub(name string, sink func(line string) bool) *Hub {
 	return &Hub{name: name, sink: sink, peers: make(map[net.Conn]peer)}
 }
 
@@ -232,10 +232,12 @@ func (h *Hub) Serve(conn net.Conn) {
 // offering spooled entries oldest-first as envelopes, redelivering
 // what goes unACKed past RetryInterval, and removing an entry only
 // when the rider's ACK arrives. Each pass is bounded (a headroom's
-// worth of sends, never past the outbox threshold) and runs under
-// h.mu, which serializes it with registration and removal — the pump
-// can only send while its peer is registered, so it can never write
-// to a closed outbox. Between passes it sleeps until kicked by a new
+// worth of sends, never past the outbox threshold) and its Offer pass
+// runs under h.mu, which serializes SENDING with registration and
+// removal — the pump can only send while its peer is registered, so it
+// never writes to a closed outbox. ACK-driven Removes run outside the
+// lock: FileSpool operations are safe concurrently, and only this
+// goroutine removes for this name. Between passes it sleeps until kicked by a new
 // Add, an ACK, or the retry half-interval.
 func (h *Hub) pump(conn net.Conn, me peer, name string) {
 	inflight := map[string]time.Time{}
@@ -274,8 +276,10 @@ func (h *Hub) pump(conn net.Conn, me peer, name string) {
 			}
 			from, payload, ok := ParseMessage(line)
 			if !ok {
-				// Not a message line: unrecoverable garbage; drop it.
+				// Not a message line: unrecoverable garbage; drop it,
+				// and its inflight record with it.
 				h.Spool.Remove(name, id)
+				delete(inflight, id)
 				return true
 			}
 			select {
@@ -301,6 +305,37 @@ func (h *Hub) pump(conn net.Conn, me peer, name string) {
 			delete(inflight, id)
 		case <-time.After(retry / 2):
 		}
+	}
+}
+
+// AckLocal acknowledges a host-addressed envelope: the host durably
+// accepted it, so the spool may forget it.
+func (h *Hub) AckLocal(id string) {
+	if h.Spool == nil {
+		return
+	}
+	if err := h.Spool.Remove(h.name, id); err != nil && !os.IsNotExist(err) {
+		h.notice(fmt.Sprintf("could not clear host entry %s: %v", id, err), nil)
+	}
+}
+
+// DrainLocal re-offers unacked host-addressed entries to the sink,
+// oldest first — the host's catch-up after a restart. Stops at the
+// first refusal.
+func (h *Hub) DrainLocal() {
+	if h.Spool == nil || h.sink == nil {
+		return
+	}
+	err := h.Spool.Offer(h.name, func(id, line string) bool {
+		from, payload, ok := ParseMessage(line)
+		if !ok {
+			h.Spool.Remove(h.name, id) // garbage entry
+			return true
+		}
+		return h.sink(Message(from, Envelope(id, payload)))
+	})
+	if err != nil {
+		h.notice(fmt.Sprintf("host spool drain failed: %v", err), nil)
 	}
 }
 
@@ -333,10 +368,20 @@ func (h *Hub) deliver(from, text string, via net.Conn) {
 		var spoolNotice string
 		toHost := to == h.name
 		h.mu.Lock()
+		var hostEnvelope string
 		switch {
+		case toHost && h.Spool != nil:
+			// The host gets the same durable-first contract as remote
+			// riders (PR #18 review): spool, deliver enveloped, forget
+			// only on AckLocal. (Sink call after unlock.)
+			id, err := h.Spool.Add(to, line)
+			if err != nil {
+				spoolNotice = fmt.Sprintf("could not spool for %s: %v — line lost", to, err)
+				break
+			}
+			hostEnvelope = Message(from, Envelope(id, payload))
 		case toHost:
-			// The host is local: its sink IS durable acceptance, no
-			// envelope round trip needed. (Sink call after unlock.)
+			// Legacy no-spool hub: direct sink delivery.
 		case h.Spool != nil:
 			// Durable first, always: every addressed line lands in the
 			// spool, the target's pump delivers it as an envelope, and
@@ -344,7 +389,7 @@ func (h *Hub) deliver(from, text string, via net.Conn) {
 			// ADR 0004). Ordering falls out: the spool is the single
 			// queue, oldest first. Disk I/O under h.mu is the price of
 			// making the add atomic with join/leave; one small line each.
-			if err := h.Spool.Add(to, line); err != nil {
+			if _, err := h.Spool.Add(to, line); err != nil {
 				spoolNotice = fmt.Sprintf("could not spool for %s: %v — line lost", to, err)
 				break
 			}
@@ -378,7 +423,14 @@ func (h *Hub) deliver(from, text string, via net.Conn) {
 		}
 		h.mu.Unlock()
 		if toHost && h.sink != nil && from != h.name {
-			h.sink(line)
+			if hostEnvelope != "" {
+				// Acceptance is signalled via AckLocal (after the host
+				// durably has it); a refusal leaves the entry for
+				// DrainLocal on the next start.
+				h.sink(hostEnvelope)
+			} else {
+				h.sink(line)
+			}
 		}
 		if spoolNotice != "" {
 			h.notice(spoolNotice, nil)

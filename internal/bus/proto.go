@@ -120,10 +120,16 @@ func Ack(id string) string {
 // ParseAck extracts the envelope id from an acknowledgement line.
 func ParseAck(line string) (id string, ok bool) {
 	rest, found := strings.CutPrefix(line, "ACKD ")
-	if !found || strings.TrimSpace(rest) == "" {
+	if !found {
 		return "", false
 	}
-	return strings.TrimSpace(rest), true
+	id = strings.TrimSpace(rest)
+	// One token only: a multi-token "id" can never match a spool entry
+	// and would loop through futile removes and redeliveries.
+	if id == "" || strings.ContainsAny(id, " \t") {
+		return "", false
+	}
+	return id, true
 }
 
 // Notice formats a system notice line (without newline).

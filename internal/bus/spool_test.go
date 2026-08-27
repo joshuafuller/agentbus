@@ -21,7 +21,7 @@ func drainAll(t *testing.T, s *FileSpool, rider string) []string {
 func TestSpoolAddDrainPreservesOrder(t *testing.T) {
 	s := NewFileSpool(t.TempDir(), time.Hour)
 	for _, l := range []string{"[a] first", "[b] second", "[a] third"} {
-		if err := s.Add("codex-luna", l); err != nil {
+		if _, err := s.Add("codex-luna", l); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -91,7 +91,7 @@ func TestSpoolExpiresOldEntriesAtDrain(t *testing.T) {
 func TestSpoolFilesArePrivate(t *testing.T) {
 	dir := t.TempDir()
 	s := NewFileSpool(dir, time.Hour)
-	if err := s.Add("r", "[x] secret task"); err != nil {
+	if _, err := s.Add("r", "[x] secret task"); err != nil {
 		t.Fatal(err)
 	}
 	riderDir := filepath.Join(dir, "r")
@@ -114,7 +114,7 @@ func TestSpoolFilesArePrivate(t *testing.T) {
 
 func TestSpoolRejectsUnsafeRiderName(t *testing.T) {
 	s := NewFileSpool(t.TempDir(), time.Hour)
-	if err := s.Add("../evil", "[x] escape"); err == nil {
+	if _, err := s.Add("../evil", "[x] escape"); err == nil {
 		t.Fatal("Add accepted a path-traversal rider name")
 	}
 }

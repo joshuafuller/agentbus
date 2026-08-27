@@ -113,6 +113,11 @@ func TestAckRoundTrip(t *testing.T) {
 	if _, ok := ParseAck("[a] hi"); ok {
 		t.Fatal("ParseAck accepted a message line")
 	}
+	// A multi-token id can never match a spool entry; accepting it
+	// yields futile Removes and a redelivery loop. (PR #18 review.)
+	if id, ok := ParseAck("ACKD 1787-000042 extra"); ok {
+		t.Fatalf("ParseAck accepted a multi-token id: %q", id)
+	}
 }
 
 func TestNotice(t *testing.T) {
