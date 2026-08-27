@@ -14,6 +14,7 @@ without you as the copy-paste bus.*
 ![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-lightgrey)
 ![Transport](https://img.shields.io/badge/transport-WireGuard%C2%AE%20via%20tailcat-88171A)
 ![Model](https://img.shields.io/badge/works%20with-Claude%20Code%20%C2%B7%20Codex-7C3AED)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 </div>
 
@@ -250,6 +251,10 @@ not from missing structure. Lines are debuggable with `cat`.
 </details>
 
 ---
+
+## License
+
+[MIT](LICENSE).
 
 <div align="center">
 <sub>Built on <a href="https://github.com/tailscale/tailcat">tailcat</a>.
