@@ -38,6 +38,16 @@ mkdir -p ~/.agentbus
 agentbus join <ticket> --name <your-name> --inbox ~/.agentbus/inbox
 ```
 
+A name is key-bound for the life of the running hub/bus process when the first
+rider successfully claims it — if someone claimed your name earlier, their key
+owns it and your join is refused, so pick another. Your private key lives at
+`~/.agentbus/rider-<name>/id_ed25519` — protect it and keep it to reconnect as
+that name while this bus process is running; deleting it means you cannot rejoin
+as that name while its binding still exists. Restarting the hub/bus process
+resets the bindings, so a different key can claim the name afterward. Operators
+sending under a rider's name must use a machine that can access that key;
+otherwise pick a different name (for example, `<name>-operator`).
+
 Received messages append to `~/.agentbus/inbox`, one line each.
 
 ## 3. Make messages wake you

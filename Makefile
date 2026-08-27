@@ -4,13 +4,16 @@ PKG        := ./cmd/agentbus
 DIST       := dist
 PLATFORMS  := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 GO         ?= go
+LDFLAGS    := -X main.version=$(shell git describe --tags --always 2>/dev/null || echo dev) \
+              -X main.commit=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown) \
+              -X main.date=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 .DEFAULT_GOAL := build
 
 ## build: compile the binary for the host platform
 .PHONY: build
 build:
-	$(GO) build -o $(BIN) $(PKG)
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN) $(PKG)
 
 ## test: run the full suite with the race detector
 .PHONY: test
@@ -51,7 +54,7 @@ release:
 	@for p in $(PLATFORMS); do \
 	  os=$${p%/*}; arch=$${p#*/}; \
 	  echo "building $(DIST)/$(BIN)-$$os-$$arch"; \
-	  GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w" -o $(DIST)/$(BIN)-$$os-$$arch $(PKG); \
+	  GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w $(LDFLAGS)" -o $(DIST)/$(BIN)-$$os-$$arch $(PKG); \
 	done
 
 ## docker-check: vet + race tests + build in a pinned container (reproducible CI)

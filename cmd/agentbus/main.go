@@ -29,12 +29,18 @@ import (
 // busPort is the virtual TCP port the bus speaks on inside the tunnel.
 const busPort = 2255
 
+// heartbeatEvery is how often a long-lived connection pings the hub.
+// A var so tests can shrink it; must stay well under the hub's default
+// QuietAfter or every healthy rider gets flagged unresponsive.
+var heartbeatEvery = 30 * time.Second
+
 const usage = `agentbus — a message bus for AI agents. One ticket, any number of riders.
 
 Usage:
   agentbus host [flags]                 start a bus, print its ticket
   agentbus join <ticket> [flags]        ride the bus (stays connected)
   agentbus send <ticket> [flags] <msg>  send one message and exit
+  agentbus version                      print version information
   agentbus task <ticket> <rider> <msg>  send an A2A task to one rider and
                                         follow it to completion or failure
   agentbus invite <ticket> [flags]      print a copy-paste boarding pass
@@ -96,6 +102,9 @@ func main() {
 		fs.Parse(rest)
 		validateName()
 		err = runSend(ticket, *name, strings.Join(fs.Args(), " "))
+	case "version":
+		fs.Parse(args)
+		printVersion(os.Stdout)
 	case "task":
 		ticket, rest := popTicket(args)
 		timeout := fs.Duration("timeout", 10*time.Minute, "give up if the task has not finished by then")
@@ -326,6 +335,17 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 	if err := bus.ClientHello(conn, sc, name, false, key); err != nil {
 		return err
 	}
+	// Heartbeat: silence must mean something is wrong, not that the
+	// rider is idle — every join pings so the hub's liveness monitor
+	// can flag genuinely unresponsive participants (issue #8).
+	interval := heartbeatEvery
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for range t.C {
+			sendLine(bus.Ping())
+		}
+	}()
 	// Stdin forwarding starts only AFTER the handshake: a buffered
 	// stdin line sent between HELLO and SIG would be read as handshake
 	// traffic and get the connection refused (PR #20 review, P1).
