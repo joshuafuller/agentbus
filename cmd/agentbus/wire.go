@@ -101,5 +101,7 @@ func runWire(runtime, ticket, name, model string) error {
 	fmt.Printf("wired: %s is on the bus (runtime %s, pid %d)\n", name, runtime, join.Process.Pid)
 	fmt.Printf("rider home: %s (log: join.log)\n", dir)
 	fmt.Printf("disconnect:  kill %d\n", join.Process.Pid)
+	fmt.Printf("note: %s executes shell commands autonomously for bus tasks;\n", name)
+	fmt.Printf("anyone holding this ticket can send it tasks. Guard the ticket.\n")
 	return nil
 }
