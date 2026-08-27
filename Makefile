@@ -4,8 +4,8 @@ PKG        := ./cmd/agentbus
 DIST       := dist
 PLATFORMS  := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 GO         ?= go
-LDFLAGS    := -X main.version=$(shell git describe --tags --always) \
-              -X main.commit=$(shell git rev-parse --short HEAD) \
+LDFLAGS    := -X main.version=$(shell git describe --tags --always 2>/dev/null || echo dev) \
+              -X main.commit=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown) \
               -X main.date=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 .DEFAULT_GOAL := build
