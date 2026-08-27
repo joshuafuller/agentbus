@@ -93,8 +93,10 @@ func BlobChunk(id string, seq int, data []byte) string {
 
 // ParseBlobChunk extracts one data frame.
 func ParseBlobChunk(line string) (id string, seq int, data []byte, ok bool) {
-	f := strings.Fields(line)
-	if len(f) != 5 || f[0] != "BLOB" || f[1] != "C" {
+	// SplitN preserves the empty final field used by a zero-byte chunk;
+	// strings.Fields would discard it.
+	f := strings.SplitN(line, " ", 5)
+	if len(f) != 5 || f[0] != "BLOB" || f[1] != "C" || f[2] == "" || f[3] == "" {
 		return "", 0, nil, false
 	}
 	if !validBlobID(f[2]) {

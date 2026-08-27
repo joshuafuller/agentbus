@@ -108,20 +108,27 @@ func runPutConn(conn net.Conn, name, rider, path string, key ed25519.PrivateKey,
 		return 2
 	}
 	buf := make([]byte, putChunkBytes)
-	for seq := 1; ; seq++ {
-		n, rerr := io.ReadFull(f, buf)
-		if n > 0 {
-			if _, err := fmt.Fprintf(conn, "%s\n", bus.Addressed(rider, bus.BlobChunk(id, seq, buf[:n]))); err != nil {
-				fmt.Fprintf(out, "send failed at chunk %d: %v\n", seq, err)
+	if info.Size() == 0 {
+		if _, err := fmt.Fprintf(conn, "%s\n", bus.Addressed(rider, bus.BlobChunk(id, 1, nil))); err != nil {
+			fmt.Fprintf(out, "send failed at chunk 1: %v\n", err)
+			return 2
+		}
+	} else {
+		for seq := 1; ; seq++ {
+			n, rerr := io.ReadFull(f, buf)
+			if n > 0 {
+				if _, err := fmt.Fprintf(conn, "%s\n", bus.Addressed(rider, bus.BlobChunk(id, seq, buf[:n]))); err != nil {
+					fmt.Fprintf(out, "send failed at chunk %d: %v\n", seq, err)
+					return 2
+				}
+			}
+			if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
+				break
+			}
+			if rerr != nil {
+				fmt.Fprintf(out, "read failed at chunk %d: %v\n", seq, rerr)
 				return 2
 			}
-		}
-		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
-			break
-		}
-		if rerr != nil {
-			fmt.Fprintf(out, "read failed at chunk %d: %v\n", seq, rerr)
-			return 2
 		}
 	}
 

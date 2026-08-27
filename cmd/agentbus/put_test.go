@@ -86,6 +86,64 @@ func TestPutRoundTripOverHub(t *testing.T) {
 	}
 }
 
+func TestPutZeroByteRoundTrip(t *testing.T) {
+	h := bus.NewHub("host", nil)
+	rc, srv := net.Pipe()
+	t.Cleanup(func() { rc.Close() })
+	go h.Serve(srv)
+	if _, err := rc.Write([]byte(bus.Hello("bob") + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	spool := t.TempDir()
+	frames := make(chan string, 4)
+	go func() {
+		br := bus.NewBlobReceiver(spool, 0, func(string) {})
+		br.Reply = func(to, line string) { rc.Write([]byte(bus.Addressed(to, line) + "\n")) }
+		sc := bufio.NewScanner(rc)
+		sc.Buffer(make([]byte, 0, 64*1024), 256*1024)
+		for sc.Scan() {
+			from, body, ok := bus.ParseMessage(sc.Text())
+			if !ok {
+				continue
+			}
+			if id, payload, isEnv := bus.ParseEnvelope(body); isEnv {
+				rc.Write([]byte(bus.Ack(id) + "\n"))
+				body = payload
+			}
+			frames <- body
+			br.Offer(from, body)
+		}
+	}()
+
+	src := filepath.Join(t.TempDir(), "empty.bin")
+	if err := os.WriteFile(src, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int, 1)
+	var out strings.Builder
+	go func() { done <- runPutConn(requesterConn(t, h), "alice", "bob", src, nil, &out) }()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case frame := <-frames:
+			if _, _, _, ok := bus.ParseBlobChunk(frame); ok {
+				select {
+				case code := <-done:
+					if code != 0 {
+						t.Fatalf("zero-byte put returned %d: %q", code, out.String())
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("zero-byte put did not complete after empty chunk")
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("zero-byte put did not emit an empty completion chunk")
+		}
+	}
+}
+
 func TestPutRefusesMissingFileAndBadRider(t *testing.T) {
 	h := bus.NewHub("host", nil)
 	var out strings.Builder

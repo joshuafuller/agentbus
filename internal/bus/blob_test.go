@@ -64,6 +64,14 @@ func TestBlobChunkRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBlobChunkEmptyRoundTrip(t *testing.T) {
+	line := BlobChunk("x7", 1, nil)
+	id, seq, data, ok := ParseBlobChunk(line)
+	if !ok || id != "x7" || seq != 1 || len(data) != 0 {
+		t.Fatalf("empty chunk did not parse: ok=%v id=%q seq=%d data=%x", ok, id, seq, data)
+	}
+}
+
 func TestBlobChunkRejectsUnsafeID(t *testing.T) {
 	line := BlobChunk("../../outside", 1, []byte("data"))
 	if _, _, _, ok := ParseBlobChunk(line); ok {
