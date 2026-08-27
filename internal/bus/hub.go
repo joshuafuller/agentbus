@@ -149,7 +149,25 @@ func (h *Hub) Peers() []string {
 
 // deliver relays a message from sender name `from` to every peer with a
 // different name and to the local sink. `via` is the originating conn.
+// An addressed line (TO <name> <payload>) goes only to peers holding
+// that name — or only to the sink when addressed to the host — so an
+// addressed delivery never wakes an uninvolved agent (ADR 0003).
 func (h *Hub) deliver(from, text string, via net.Conn) {
+	if to, payload, ok := ParseAddressed(text); ok {
+		line := Message(from, payload)
+		h.mu.Lock()
+		for conn, p := range h.peers {
+			if p.oneshot || p.name != to || conn == via {
+				continue
+			}
+			writeLine(conn, line)
+		}
+		h.mu.Unlock()
+		if h.sink != nil && to == h.name && from != h.name {
+			h.sink(line)
+		}
+		return
+	}
 	line := Message(from, text)
 	h.mu.Lock()
 	for conn, p := range h.peers {

@@ -1,0 +1,134 @@
+package main
+
+import (
+	"bufio"
+	"net"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/joshuafuller/agentbus/internal/bus"
+	"github.com/joshuafuller/agentbus/internal/task"
+)
+
+// startRider joins hub as a wired rider whose runner echoes the prompt.
+// runner == nil means a deaf rider: joined, welcomed, never executing.
+func startRider(t *testing.T, h *bus.Hub, name string, runner func(string) (string, error)) {
+	t.Helper()
+	client, server := net.Pipe()
+	t.Cleanup(func() { client.Close() })
+	go h.Serve(server)
+	if _, err := client.Write([]byte(bus.Hello(name) + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	r := &task.Rider{
+		Dir:    t.TempDir(),
+		Runner: runner,
+		Send: func(line string) {
+			mu.Lock()
+			defer mu.Unlock()
+			client.Write([]byte(line + "\n"))
+		},
+	}
+	sc := bufio.NewScanner(client)
+	// Consume the welcome before returning: only then is the rider
+	// registered, and an addressed line can reach it. (An addressed
+	// line sent before registration reaches nobody — the requester
+	// sees it as a task that is never acknowledged.)
+	if !sc.Scan() || !strings.Contains(sc.Text(), "welcome aboard") {
+		t.Fatalf("no welcome for rider %s: %q", name, sc.Text())
+	}
+	go func() {
+		for sc.Scan() {
+			from, payload, ok := bus.ParseMessage(sc.Text())
+			if !ok || runner == nil {
+				continue // notices, or a deaf rider
+			}
+			r.Handle(from, payload)
+		}
+	}()
+}
+
+func requesterConn(t *testing.T, h *bus.Hub) net.Conn {
+	t.Helper()
+	client, server := net.Pipe()
+	t.Cleanup(func() { client.Close() })
+	go h.Serve(server)
+	return client
+}
+
+func TestExecRunnerCapturesStdoutAsResult(t *testing.T) {
+	runner := execRunner(`printf 'got:%s' "$AGENTBUS_MSG"`)
+	out, err := runner("hi there")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "got:hi there" {
+		t.Fatalf("runner returned %q", out)
+	}
+}
+
+func TestExecRunnerReportsFailure(t *testing.T) {
+	runner := execRunner(`echo "boom" >&2; exit 3`)
+	if _, err := runner("x"); err == nil {
+		t.Fatal("runner swallowed a failing wake command")
+	}
+}
+
+func TestTaskRoundTripOverHub(t *testing.T) {
+	h := bus.NewHub("host", nil)
+	startRider(t, h, "worker", func(prompt string) (string, error) {
+		return "echo: " + prompt, nil
+	})
+
+	var out strings.Builder
+	code := runTaskConn(requesterConn(t, h), "alice", "worker", "ping", 5*time.Second, &out)
+	if code != 0 {
+		t.Fatalf("exit code %d, want 0; output:\n%s", code, out.String())
+	}
+	for _, want := range []string{"submitted", "working", "completed", "echo: ping"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestTaskFailureExitsNonzero(t *testing.T) {
+	h := bus.NewHub("host", nil)
+	startRider(t, h, "worker", func(string) (string, error) {
+		return "", &net.AddrError{Err: "wake command exited 1"}
+	})
+
+	var out strings.Builder
+	code := runTaskConn(requesterConn(t, h), "alice", "worker", "x", 5*time.Second, &out)
+	if code != 1 {
+		t.Fatalf("exit code %d, want 1; output:\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "failed") {
+		t.Fatalf("output missing failure state:\n%s", out.String())
+	}
+}
+
+// The acceptance test of the whole slice: a deaf rider must be visibly
+// deaf. The rider is joined and welcomed but never executes; the
+// requester must come back saying the task was never acknowledged,
+// not hang and not claim success.
+func TestDeafRiderIsVisiblyDeaf(t *testing.T) {
+	h := bus.NewHub("host", nil)
+	startRider(t, h, "worker", nil) // deaf
+
+	var out strings.Builder
+	start := time.Now()
+	code := runTaskConn(requesterConn(t, h), "alice", "worker", "anyone home", 1*time.Second, &out)
+	if code != 2 {
+		t.Fatalf("exit code %d, want 2; output:\n%s", code, out.String())
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatal("requester did not respect the timeout")
+	}
+	if !strings.Contains(out.String(), "never acknowledged") {
+		t.Fatalf("output does not name the silence:\n%s", out.String())
+	}
+}

@@ -39,9 +39,15 @@ func claudeOnMsg(dir, model string) string {
 }
 
 // codexOnMsg builds the --on-msg command that resumes the rider's Codex
-// session for one incoming bus message.
-func codexOnMsg(dir, sessionID string) string {
-	return fmt.Sprintf(`cd %s && codex exec resume %s "$AGENTBUS_MSG"`, dir, sessionID)
+// session for one incoming bus message. A resumed turn does not inherit
+// the bootstrap's model, so a wire-time model must be repeated here or
+// resumes silently fall back to the config default.
+func codexOnMsg(dir, sessionID, model string) string {
+	modelFlag := ""
+	if model != "" {
+		modelFlag = " -m " + model
+	}
+	return fmt.Sprintf(`cd %s && codex exec resume %s%s "$AGENTBUS_MSG"`, dir, sessionID, modelFlag)
 }
 
 // runWire sets up the complete wake wiring for a runtime: bootstrap a
@@ -90,6 +96,9 @@ func runWire(runtime, ticket, name, model string) error {
 	case "codex":
 		fmt.Fprintf(os.Stderr, "wiring %s: creating rider session in %s...\n", name, dir)
 		boot := exec.Command("codex", "exec", briefing(ticket, name))
+		if model != "" {
+			boot.Args = append(boot.Args, "-m", model)
+		}
 		boot.Dir = dir
 		out, err := boot.CombinedOutput()
 		if err != nil {
@@ -99,7 +108,7 @@ func runWire(runtime, ticket, name, model string) error {
 		if m == nil {
 			return fmt.Errorf("could not find session id in codex output:\n%s", out)
 		}
-		onMsg = codexOnMsg(dir, string(m[1]))
+		onMsg = codexOnMsg(dir, string(m[1]), model)
 	default:
 		return fmt.Errorf("unknown runtime %q (want claude or codex)", runtime)
 	}

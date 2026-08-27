@@ -38,11 +38,25 @@ func TestClaudeOnMsgModel(t *testing.T) {
 }
 
 func TestCodexOnMsg(t *testing.T) {
-	cmd := codexOnMsg("/home/u/.agentbus/rider-y", "01a0-abcd")
+	cmd := codexOnMsg("/home/u/.agentbus/rider-y", "01a0-abcd", "")
 	if !strings.Contains(cmd, "codex exec resume 01a0-abcd") {
 		t.Errorf("missing resume + session id: %q", cmd)
 	}
 	if !strings.HasSuffix(cmd, `"$AGENTBUS_MSG"`) {
 		t.Errorf("prompt should trail (codex resume takes a positional prompt): %q", cmd)
+	}
+	if strings.Contains(cmd, "-m ") {
+		t.Errorf("empty model should not add -m: %q", cmd)
+	}
+}
+
+// A resumed codex turn does not inherit the bootstrap's model choice
+// from the session; without -m it falls back to the config default. The
+// wire-time model must therefore reach both the bootstrap and every
+// resume.
+func TestCodexOnMsgModel(t *testing.T) {
+	cmd := codexOnMsg("/d", "01a0-abcd", "gpt-5.6-luna")
+	if !strings.Contains(cmd, "codex exec resume 01a0-abcd -m gpt-5.6-luna") {
+		t.Errorf("model not passed to resume: %q", cmd)
 	}
 }
