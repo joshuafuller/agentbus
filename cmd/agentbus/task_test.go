@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"net"
 	"strings"
 	"sync"
@@ -57,6 +58,34 @@ func requesterConn(t *testing.T, h *bus.Hub) net.Conn {
 	t.Cleanup(func() { client.Close() })
 	go h.Serve(server)
 	return client
+}
+
+// driverLine rewrites task payloads into readable lines for a driver's
+// terminal and inbox; chat and anything unparseable pass through as-is.
+func TestDriverLineRendersTaskSnapshot(t *testing.T) {
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("x"))
+	tk := a2a.NewSubmittedTask(msg, msg)
+	tk.Status = a2a.TaskStatus{State: a2a.TaskStateCompleted,
+		Message: a2a.NewMessageForTask(a2a.MessageRoleAgent, tk, a2a.NewTextPart("174719"))}
+	raw := bus.Message("codex-luna", task.EncodeTask(tk))
+
+	got := driverLine(raw)
+	if strings.Contains(got, "{") {
+		t.Fatalf("driver still sees JSON: %q", got)
+	}
+	for _, want := range []string{"[codex-luna]", "completed", "174719"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("driver line %q missing %q", got, want)
+		}
+	}
+}
+
+func TestDriverLinePassesChatThrough(t *testing.T) {
+	for _, raw := range []string{bus.Message("alice", "hey there"), "not a message line"} {
+		if got := driverLine(raw); got != raw {
+			t.Fatalf("driverLine changed %q to %q", raw, got)
+		}
+	}
 }
 
 func TestExecRunnerCapturesStdoutAsResult(t *testing.T) {

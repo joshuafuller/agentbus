@@ -85,6 +85,20 @@ requesting side: it follows the lifecycle and exits 0 (completed),
 `--timeout` — including a task never acknowledged, which is how a deaf
 rider becomes visible).
 
+When the hub relays an `A2A-TASK` snapshot it also emits a **transition
+notice** to the whole feed:
+
+```
+* task <first-8-of-id>: <state> (<requester> → <rider>)
+```
+
+so every driver sees task lifecycle in realtime while the payload itself
+stays addressed. Notices ride the notice path, so a transition notice is
+structurally incapable of waking a rider. On a driver's `join` (no
+`--on-msg`), arriving task payloads are additionally rendered as one
+readable line — `[<rider>] task <id8> <state> → <result or cause>` — in
+the terminal and the inbox file, in place of the raw JSON.
+
 ### Notice (hub → clients)
 
 ```
