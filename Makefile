@@ -54,6 +54,16 @@ release:
 	  GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w" -o $(DIST)/$(BIN)-$$os-$$arch $(PKG); \
 	done
 
+## docker-check: vet + race tests + build in a pinned container (reproducible CI)
+.PHONY: docker-check
+docker-check:
+	docker build --target builder -t agentbus-build .
+
+## docker-image: build the minimal runtime image (agentbus:local)
+.PHONY: docker-image
+docker-image:
+	docker build -t agentbus:local .
+
 ## clean: remove build artifacts
 .PHONY: clean
 clean:
