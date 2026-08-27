@@ -12,8 +12,8 @@ import (
 // other peer (by name, so a peer's send and receive connections under
 // the same name never echo back) and to the local sink.
 type Hub struct {
-	name string             // the host's own participant name
-	sink func(line string)  // local delivery of message lines; may be nil
+	name string            // the host's own participant name
+	sink func(line string) // local delivery of message lines; may be nil
 
 	// OnNotice, if non-nil, receives system notice lines (joins and
 	// leaves) for local display. Kept separate from sink so notices are
@@ -82,6 +82,15 @@ func (h *Hub) Serve(conn net.Conn) {
 	}
 	h.mu.Unlock()
 	if stale != nil {
+		// Tell the displaced connection why it is going away. Without
+		// this its operator sees a bare EOF in the rider log, which is
+		// indistinguishable from a network drop — and a displacement is
+		// exactly the event an operator most needs to notice, because
+		// names are not authenticated (SECURITY.md T2) and the joiner
+		// may not be who the name implies. Best effort: the peer may
+		// already be gone, and writeLine's deadline bounds the wait.
+		writeLine(stale, Notice(fmt.Sprintf(
+			"displaced — another connection joined as %s and took this name", name)))
 		stale.Close()
 	}
 	// The welcome confirms registration: once a joiner reads it, the
@@ -89,7 +98,15 @@ func (h *Hub) Serve(conn net.Conn) {
 	fmt.Fprintf(conn, "%s\n", Notice(fmt.Sprintf("welcome aboard, %s — %d on the bus", name, n)))
 	if !oneshot {
 		if stale != nil {
-			h.notice(fmt.Sprintf("%s reconnected", name), conn)
+			// Say what happened, not what it usually means. "reconnected"
+			// describes the common case (a rider's host woke up) but reads
+			// identically when the joiner is a different party taking the
+			// name, which unauthenticated names permit. Naming the
+			// displacement costs nothing in the benign case and removes
+			// the disguise in the hostile one. Prevention — a returning
+			// rider proving itself with a key — is issue #6.
+			h.notice(fmt.Sprintf(
+				"%s joined, displacing an existing connection under that name", name), conn)
 		} else {
 			h.notice(fmt.Sprintf("%s hopped on the bus", name), conn)
 		}
@@ -100,6 +117,10 @@ func (h *Hub) Serve(conn net.Conn) {
 	}
 
 	h.mu.Lock()
+	// still is false when this conn was displaced by a later same-name
+	// join: that join already removed it from h.peers and announced the
+	// displacement, so suppressing the departure notice here avoids
+	// reporting a leave that would read as the *new* holder leaving.
 	_, still := h.peers[conn]
 	delete(h.peers, conn)
 	h.mu.Unlock()

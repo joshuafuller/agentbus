@@ -236,3 +236,74 @@ func TestBadHelloRejected(t *testing.T) {
 		t.Fatal("Serve did not close bad-hello conn")
 	}
 }
+
+// TestDisplacementIsAnnouncedNotDisguised guards the concealment half of
+// the same-name takeover: because names are unauthenticated, a join that
+// displaces an existing connection may be a different party taking the
+// name. The bus must say a displacement happened rather than report it as
+// a routine "reconnected", which reads identically to a rider's host
+// waking from sleep. Prevention (a returning rider proving itself with a
+// key) is issue #6; this test only guards visibility.
+func TestDisplacementIsAnnouncedNotDisguised(t *testing.T) {
+	h := NewHub("host", nil)
+	_, watcherLines := testPeer(t, h, "watcher")
+	_, _ = testPeer(t, h, "codex")
+	drainNotice(t, watcherLines, "codex") // codex hopped on
+
+	_, _ = testPeer(t, h, "codex") // displaces the first codex
+
+	l := recvLine(t, watcherLines)
+	if !IsNotice(l) {
+		t.Fatalf("watcher got %q, want a notice", l)
+	}
+	if !strings.Contains(l, "displacing") {
+		t.Fatalf("displacement not announced: %q", l)
+	}
+	if strings.Contains(l, "reconnected") {
+		t.Fatalf("displacement still disguised as a reconnect: %q", l)
+	}
+}
+
+// TestDisplacedPeerIsToldWhy guards that the evicted connection learns the
+// cause before the hub closes it. Without this its operator sees only EOF
+// in the rider log, which is indistinguishable from a network drop.
+func TestDisplacedPeerIsToldWhy(t *testing.T) {
+	h := NewHub("host", nil)
+	_, oldLines := testPeer(t, h, "codex")
+	_, _ = testPeer(t, h, "codex") // displaces it
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case l, ok := <-oldLines:
+			if !ok {
+				t.Fatal("displaced peer was closed without being told why")
+			}
+			if IsNotice(l) && strings.Contains(l, "displaced") {
+				return // told before close
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for the displacement notice")
+		}
+	}
+}
+
+// drainNotice consumes notices until one mentioning want is seen, so a
+// test can position itself past unrelated join chatter.
+func drainNotice(t *testing.T, lines <-chan string, want string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case l, ok := <-lines:
+			if !ok {
+				t.Fatalf("channel closed waiting for a notice mentioning %q", want)
+			}
+			if IsNotice(l) && strings.Contains(l, want) {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for a notice mentioning %q", want)
+		}
+	}
+}
