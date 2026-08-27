@@ -1,6 +1,6 @@
 # 0001 — Adopt A2A for task semantics; own transport, admission, and activation
 
-**Status:** Proposed
+**Status:** Accepted — 2026-08-27
 **Date:** 2026-08-27
 
 ## Context

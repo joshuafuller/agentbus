@@ -1,6 +1,6 @@
 # 0002 — Rider identity via per-rider keys and signed Agent Cards
 
-**Status:** Proposed
+**Status:** Accepted — 2026-08-27
 **Date:** 2026-08-27
 
 ## Context

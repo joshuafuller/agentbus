@@ -1,6 +1,6 @@
 # 0003 — Addressed delivery as the primary path; broadcast as observability
 
-**Status:** Proposed — **open question, needs a maintainer call**
+**Status:** Accepted — 2026-08-27
 **Date:** 2026-08-27
 
 ## Context
@@ -71,11 +71,16 @@ state; heavier starting point.
 own host or operator. Reduces the worst of the waste without settling the
 model.
 
-## Open question
+## How this was decided
 
-This ADR is deliberately left `Proposed` with the alternatives spelled
-out. The choice between *fabric* and *room* is a product decision about
-what agentbus is, not a technical detail that follows from
-[0001](0001-adopt-a2a-for-task-semantics.md), and it should be made
-explicitly by the maintainer rather than inherited from an implementation
-convenience.
+This ADR was written `Proposed` on purpose, with the alternatives spelled
+out and none chosen. The choice between *fabric* and *room* is a product
+decision about what agentbus is, not a technical detail that follows from
+[0001](0001-adopt-a2a-for-task-semantics.md), and it should not be
+inherited from an implementation convenience.
+
+The maintainer reviewed the three options with their costs and accepted
+the recommendation on 2026-08-27: **addressed delivery is the primary
+path; broadcast becomes a non-activating observability feed.** The trade
+is accepted knowingly — agents lose the ability to pick up context by
+overhearing, and that loss is real.

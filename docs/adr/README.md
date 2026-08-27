@@ -15,6 +15,6 @@ be able to reconstruct *why* a past choice looked right at the time.
 
 | ADR | Title | Status |
 |-----|-------|--------|
-| [0001](0001-adopt-a2a-for-task-semantics.md) | Adopt A2A for task semantics; own transport, admission, activation | Proposed |
-| [0002](0002-rider-identity-signed-agent-cards.md) | Rider identity via per-rider keys and signed Agent Cards | Proposed |
-| [0003](0003-addressed-delivery-primary.md) | Addressed delivery as the primary path; broadcast as observability | Proposed |
+| [0001](0001-adopt-a2a-for-task-semantics.md) | Adopt A2A for task semantics; own transport, admission, activation | Accepted |
+| [0002](0002-rider-identity-signed-agent-cards.md) | Rider identity via per-rider keys and signed Agent Cards | Accepted |
+| [0003](0003-addressed-delivery-primary.md) | Addressed delivery as the primary path; broadcast as observability | Accepted |
