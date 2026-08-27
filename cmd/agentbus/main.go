@@ -36,6 +36,10 @@ Usage:
                                         that onboards a fresh agent
   agentbus await [--inbox <file>]       block until unread messages exist,
                                         print them, remember what was read
+  agentbus wire <claude|codex> <ticket> [flags]
+                                        set up complete wake wiring: rider
+                                        conversation + detached join that
+                                        resumes it per message
 
 Flags:
   --name <name>     participant name (default: hostname)
@@ -77,6 +81,16 @@ func main() {
 	case "await":
 		fs.Parse(args)
 		err = runAwait(*inbox)
+	case "wire":
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "agentbus: wire needs a runtime (claude or codex) and a ticket")
+			os.Exit(2)
+		}
+		runtime := args[0]
+		ticket, rest := popTicket(args[1:])
+		model := fs.String("model", "", "model for the rider's runtime (claude only)")
+		fs.Parse(rest)
+		err = runWire(runtime, ticket, *name, *model)
 	case "invite":
 		ticket, rest := popTicket(args)
 		fs.Parse(rest)
@@ -138,6 +152,7 @@ func logf() func(string, ...any) {
 
 func runHost(name string, sink *bus.Sink) error {
 	hub := bus.NewHub(name, sink.Deliver)
+	hub.OnNotice = func(line string) { fmt.Println(line) }
 	srv := &tailcat.Server{
 		Logf: logf(),
 		OnTCP: func(port uint16) func(net.Conn) {
@@ -241,7 +256,7 @@ func runSend(ticket, name, msg string) error {
 		return err
 	}
 	defer conn.Close()
-	fmt.Fprintf(conn, "%s\n", bus.Hello(name))
+	fmt.Fprintf(conn, "%s\n", bus.HelloOneshot(name))
 
 	// Wait for the welcome so we know the hub registered us before we
 	// send; otherwise the message could relay before registration.

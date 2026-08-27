@@ -45,6 +45,19 @@ When the background `await` task completes, its output is the new messages:
 catch-up and read-position tracking are built in, so there is no
 arm-before-message race to get right.)
 
+## Headless or one-shot session? Different rules.
+
+The background-task pattern above assumes your harness keeps background
+tasks alive between turns and wakes you when one completes (interactive
+Claude Code does). If you are a one-shot session (`claude -p`) your process
+— and your join, and your await — dies the moment your turn ends. Do NOT
+end your turn "ready and waiting". Instead loop in the foreground:
+
+1. `agentbus await --inbox ~/.agentbus/inbox` in the FOREGROUND.
+2. When it prints messages: act, reply.
+3. Run await again. If it times out or errors, run it again — the read
+   position is saved. Repeat until told to stop.
+
 ## Send
 
 ```bash

@@ -90,11 +90,11 @@ func TestThreePeersRelay(t *testing.T) {
 	}
 }
 
-func TestSameNameNotEchoed(t *testing.T) {
+func TestOneshotSenderNotEchoedToSameName(t *testing.T) {
 	h := NewHub("host", nil)
-	// Persistent receiver and one-shot sender share the name "codex".
+	// Persistent rider and a one-shot sender share the name "codex".
 	_, rxLines := testPeer(t, h, "codex")
-	tx, _ := testPeer(t, h, "codex")
+	tx := oneshotPeer(t, h, "codex")
 	_, otherLines := testPeer(t, h, "other")
 
 	if _, err := tx.Write([]byte("STARTED t1\n")); err != nil {
@@ -106,9 +106,67 @@ func TestSameNameNotEchoed(t *testing.T) {
 	select {
 	case l := <-rxLines:
 		if !IsNotice(l) {
-			t.Fatalf("codex receiver got its own send back: %q", l)
+			t.Fatalf("codex rider got its own send back: %q", l)
 		}
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// oneshotPeer connects a write-only sender to h.
+func oneshotPeer(t *testing.T, h *Hub, name string) net.Conn {
+	t.Helper()
+	client, server := net.Pipe()
+	t.Cleanup(func() { client.Close() })
+	go h.Serve(server)
+	if _, err := client.Write([]byte(HelloOneshot(name) + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	sc := bufio.NewScanner(client)
+	if !sc.Scan() || !strings.Contains(sc.Text(), "welcome") {
+		t.Fatalf("oneshot got no welcome: %q", sc.Text())
+	}
+	return client
+}
+
+func TestSameNameJoinSupersedes(t *testing.T) {
+	h := NewHub("host", nil)
+	old, oldLines := testPeer(t, h, "codex")
+	_ = old
+	_, freshLines := testPeer(t, h, "codex") // supersedes old
+	tx := oneshotPeer(t, h, "tester")
+
+	// Old connection is closed by the hub.
+	deadline := time.After(2 * time.Second)
+	for closed := false; !closed; {
+		select {
+		case _, ok := <-oldLines:
+			if !ok {
+				closed = true
+			}
+		case <-deadline:
+			t.Fatal("stale same-name rider was not closed")
+		}
+	}
+
+	if _, err := tx.Write([]byte("TASK x\n")); err != nil {
+		t.Fatal(err)
+	}
+	if l := recvMessage(t, freshLines); l != Message("tester", "TASK x") {
+		t.Fatalf("fresh rider got %q", l)
+	}
+}
+
+func TestOneshotReceivesNoRelays(t *testing.T) {
+	h := NewHub("host", nil)
+	tx := oneshotPeer(t, h, "tester")
+	a, _ := testPeer(t, h, "alice")
+	if _, err := a.Write([]byte("hi\n")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 256)
+	tx.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if n, _ := tx.Read(buf); n > 0 && !IsNotice(strings.TrimSpace(string(buf[:n]))) {
+		t.Fatalf("oneshot received relay: %q", buf[:n])
 	}
 }
 

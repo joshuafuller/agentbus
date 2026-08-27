@@ -47,6 +47,24 @@ $ agentbus send tcomFw... --name human "TASK t1 review the auth diff"
 Every rider sees `[human] TASK t1 review the auth diff`. Third agent joins
 mid-session? Same ticket. Tenth? Same ticket.
 
+## Onboarding an agent: one paste, zero context
+
+Agents don't read your README. So the tool writes their onboarding for you:
+
+```console
+$ agentbus invite <ticket> --name codex-2
+```
+
+prints a **boarding pass** — a single self-contained blob you paste into any
+fresh agent session. It carries the install command, the join command with
+the ticket already embedded, the wake loop, and the reply conventions. The
+agent needs no prior knowledge of agentbus, this repo, or you: it actions
+the pass top to bottom and comes up on the bus saying hello. The host prints
+this reminder next to the ticket.
+
+The long-form version an agent can read later is
+[`BOARDING.md`](BOARDING.md).
+
 ## The point: messages wake idle agents
 
 Storage isn't delivery. A message that lands in a mailbox while the agent

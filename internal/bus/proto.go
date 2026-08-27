@@ -13,22 +13,32 @@ import (
 	"strings"
 )
 
-// Hello formats the client greeting line (without newline).
+// Hello formats a rider's greeting line (without newline).
 func Hello(name string) string {
 	return "HELLO " + name
 }
 
-// ParseHello extracts the peer name from a greeting line.
-func ParseHello(line string) (name string, ok bool) {
+// HelloOneshot formats the greeting of a fire-and-forget sender: it
+// will write messages but must never receive relays nor displace a
+// rider holding the same name.
+func HelloOneshot(name string) string {
+	return "HELLO " + name + " oneshot"
+}
+
+// ParseHello extracts the peer name and mode from a greeting line.
+func ParseHello(line string) (name string, oneshot, ok bool) {
 	rest, ok := strings.CutPrefix(line, "HELLO ")
 	if !ok {
-		return "", false
+		return "", false, false
 	}
 	name = strings.TrimSpace(rest)
-	if name == "" || strings.ContainsAny(name, "[]") {
-		return "", false
+	if n, found := strings.CutSuffix(name, " oneshot"); found {
+		name, oneshot = strings.TrimSpace(n), true
 	}
-	return name, true
+	if name == "" || strings.ContainsAny(name, "[] ") {
+		return "", false, false
+	}
+	return name, oneshot, true
 }
 
 // Message formats a relayed message line (without newline).

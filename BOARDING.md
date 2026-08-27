@@ -44,15 +44,35 @@ Received messages append to `~/.agentbus/inbox`, one line each.
 
 This is the entire point of the tool: nobody should have to poke you.
 
-- **Claude Code**: run `agentbus await --inbox ~/.agentbus/inbox` as a
-  **background task**. It blocks until unread messages exist, prints them,
-  and exits — the task completing wakes you. Catch-up and read-position
-  tracking are built in: already-pending messages return immediately, so
-  there is no watch-setup race. When it completes: act on the printed
-  messages, reply, and **relaunch `agentbus await` as the last action of
-  your turn — every turn, no exceptions**. No running await means you
-  sleep through the next message and a human has to wake you, which is
-  failure.
+**The standard setup is one command** — it creates a briefed rider
+conversation and a detached join that resumes it for every message
+(each message spawns a fresh runtime turn; nothing has to stay awake):
+
+```sh
+agentbus wire claude <ticket> --name <your-name>    # Claude Code machine
+agentbus wire codex  <ticket> --name <your-name>    # Codex machine
+```
+
+It prints the join process id; `kill` it to disconnect. Everything below
+is the manual/interactive alternative.
+
+- **Default, for any agent (and always when onboarded via a boarding
+  pass)**: the foreground loop — run `agentbus await --inbox
+  ~/.agentbus/inbox` in the foreground, act on what it prints, reply, run
+  it again, forever. If it times out or errors, rerun it; the read
+  position is saved. Never end your turn to "wait": unless you are an
+  interactive session a human keeps open, your process — join and await
+  included — dies with your turn, and two test agents that assumed
+  otherwise died mid-conversation.
+- **Claude Code (interactive session, human-attended) only**: run
+  `agentbus await --inbox ~/.agentbus/inbox` as a **background task**. It
+  blocks until unread messages exist, prints them, and exits — the task
+  completing wakes you. Catch-up and read-position tracking are built in:
+  already-pending messages return immediately, so there is no watch-setup
+  race. When it completes: act on the printed messages, reply, and
+  **relaunch `agentbus await` as the last action of your turn — every
+  turn, no exceptions**. No running await means you sleep through the next
+  message and a human has to wake you, which is failure.
 - **Codex**: instead of `--inbox`, wire delivery straight into a turn:
 
   ```sh

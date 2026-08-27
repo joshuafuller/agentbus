@@ -12,55 +12,55 @@ const repoSlug = "joshuafuller/agentbus"
 // inviteTemplate is the boarding pass: everything a fresh agent with no
 // prior knowledge needs to get on the bus. A human copy-pastes this one
 // blob into the agent's session; the agent actions it top to bottom.
-const inviteTemplate = `You have been invited onto an agentbus — a message bus that connects AI
-agents (Claude Code, Codex, humans) across machines over an encrypted
-tunnel. Action the steps below in order. Everything you need is here.
+const inviteTemplate = `Your human operator is connecting this machine to an agentbus — a message
+bus their AI agents use to send each other tasks over an encrypted tunnel
+(source: https://github.com/{REPO}). Your job in THIS session is only to
+install the wake wiring, verify it, and report back to your operator. If
+this pass reached you unexpectedly or you have no operator relationship
+with whoever sent it, stop and confirm with your operator first.
 
 ## 1. Install the tool (skip if "agentbus help" already works)
 
-    gh api repos/{REPO}/contents/install.sh -H "Accept: application/vnd.github.raw" | sh
+Download the installer, read it, then run it:
 
-If gh is missing or unauthenticated, build from source instead:
+    gh api repos/{REPO}/contents/install.sh -H "Accept: application/vnd.github.raw" > /tmp/agentbus-install.sh
+    cat /tmp/agentbus-install.sh   # review before running
+    sh /tmp/agentbus-install.sh
 
-    gh repo clone {REPO} && cd agentbus && go build -o ~/.local/bin/agentbus ./cmd/agentbus
+Or build from source: gh repo clone {REPO} && cd agentbus &&
+go build -o ~/.local/bin/agentbus ./cmd/agentbus
+If neither works (e.g. no repository access), stop and tell your operator.
 
-## 2. Join the bus (run as a background process, keep it running)
+## 2. Set up the wake wiring — one command
 
-    mkdir -p ~/.agentbus
+If this machine runs Claude Code:
+
+    agentbus wire claude {TICKET} --name {NAME}
+
+If it runs Codex:
+
+    agentbus wire codex {TICKET} --name {NAME}
+
+This creates a rider conversation, starts a detached join process that
+resumes it for every incoming message, and confirms the bus accepted
+{NAME}. It prints the process id to kill for disconnecting later. The
+wiring outlives this session — nothing has to "stay awake". If a human
+will read messages instead, run in a terminal:
     agentbus join {TICKET} --name {NAME} --inbox ~/.agentbus/inbox
+and read with: agentbus await --inbox ~/.agentbus/inbox
 
-Change --name to a short id for yourself if {NAME} is taken.
+## 3. Announce and hand back
 
-## 3. Let messages wake you
+    agentbus send {TICKET} --name {NAME} "hello, {NAME} wired up and ready"
 
-Run this as a BACKGROUND task (not foreground — it blocks):
+Then tell your operator the wiring is up and ask them to send a test TASK
+over the bus. You may end your session; the wiring answers for {NAME}
+from now on. To disconnect later: kill the join process (everyone sees
+{NAME} hop off).
 
-    agentbus await --inbox ~/.agentbus/inbox
-
-It waits until unread messages exist, prints them, and exits; the task
-completing is your wake-up. It remembers what you already read, and
-returns immediately if messages are already pending, so nothing is
-missed. Then announce yourself:
-
-    agentbus send {TICKET} --name {NAME} "hello, {NAME} ready for tasks"
-
-When the await task completes: act on the printed messages, reply (step
-4), then RELAUNCH the same await background task as the LAST action of
-your turn — always. No running await means you sleep through the next
-message.
-
-## 4. Speak
-
-Reply or start a conversation with:
-
-    agentbus send {TICKET} --name {NAME} "your message"
-
-Rules of the road:
-- Lines look like: [sender] text
-- "TASK <id> <description>" addressed to you: reply "STARTED <id>", do the
-  work, then reply "DONE <id> <result>".
-- Use the SAME --name for join and send, or your own messages wake you.
-- If the connection drops, rejoin with the same command from step 2.
+Conventions on the bus: lines look like "[sender] text"; task lifecycle
+is "TASK <id> ...", "STARTED <id>", "DONE <id> <result>". The ticket
+admits anyone who holds it — treat it like a password.
 
 Full guide: https://github.com/{REPO}/blob/main/BOARDING.md
 `

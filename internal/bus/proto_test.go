@@ -3,15 +3,22 @@ package bus
 import "testing"
 
 func TestHelloRoundTrip(t *testing.T) {
-	name, ok := ParseHello(Hello("codex-1"))
-	if !ok || name != "codex-1" {
-		t.Fatalf("got %q ok=%v, want codex-1 true", name, ok)
+	name, oneshot, ok := ParseHello(Hello("codex-1"))
+	if !ok || name != "codex-1" || oneshot {
+		t.Fatalf("got %q oneshot=%v ok=%v, want codex-1 false true", name, oneshot, ok)
+	}
+}
+
+func TestHelloOneshotRoundTrip(t *testing.T) {
+	name, oneshot, ok := ParseHello(HelloOneshot("tester"))
+	if !ok || name != "tester" || !oneshot {
+		t.Fatalf("got %q oneshot=%v ok=%v, want tester true true", name, oneshot, ok)
 	}
 }
 
 func TestParseHelloRejects(t *testing.T) {
-	for _, line := range []string{"HELLO ", "HELLO [x]", "hello bob", "[a] hi", "HELLO"} {
-		if name, ok := ParseHello(line); ok {
+	for _, line := range []string{"HELLO ", "HELLO [x]", "hello bob", "[a] hi", "HELLO", "HELLO two words"} {
+		if name, _, ok := ParseHello(line); ok {
 			t.Errorf("ParseHello(%q) accepted as %q, want reject", line, name)
 		}
 	}
