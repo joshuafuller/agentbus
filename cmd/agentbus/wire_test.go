@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestClaudeOnMsgPromptViaStdin guards issue #1: --allowedTools is variadic,
@@ -52,6 +53,18 @@ func TestSelfTestPassesWorkingCommand(t *testing.T) {
 func TestSelfTestFailsBrokenCommand(t *testing.T) {
 	if err := selfTest(`exit 7`); err == nil {
 		t.Fatal("broken wake command passed self-test")
+	}
+}
+
+// A wake command that hangs (stdin, network) must fail the self-test
+// within its deadline instead of hanging wire forever. (PR #19 review.)
+func TestSelfTestTimesOutHangingCommand(t *testing.T) {
+	start := time.Now()
+	if err := selfTestWithTimeout(`sleep 30`, 300*time.Millisecond); err == nil {
+		t.Fatal("hanging wake command passed self-test")
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("self-test took %v; the deadline did not bound it", d)
 	}
 }
 

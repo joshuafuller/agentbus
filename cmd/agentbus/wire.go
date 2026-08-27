@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -70,11 +71,39 @@ func codexBootArgs(briefing, model string) []string {
 // #8). Costs one model turn at wire time — the cheapest moment to
 // find out, in front of the person who can fix it.
 func selfTest(onMsg string) error {
-	out, err := execRunner(onMsg)("wire self-test: reply with exactly OK and nothing else")
+	// Generous deadline: a model turn can take a couple of minutes, but
+	// a wake command parked on stdin or a dead network must fail fast
+	// rather than hang wire forever (PR #19 review).
+	return selfTestWithTimeout(onMsg, 5*time.Minute)
+}
+
+func selfTestWithTimeout(onMsg string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	// The probe only requires that SOME answer comes back — model
+	// output framing varies by runtime, so the prompt matches the
+	// check: any brief reply proves the wake path is alive.
+	probe := "wire self-test: reply briefly to confirm you are awake"
+	cmd := exec.CommandContext(ctx, "sh", "-c", onMsg)
+	// Kill the whole process GROUP on deadline: the context alone only
+	// kills sh, and a surviving grandchild holding the stdout pipe
+	// would block Wait for its full runtime anyway. WaitDelay backstops
+	// any straggler still holding the pipe after the kill.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Env = append(os.Environ(), "AGENTBUS_MSG="+probe, "AGENTBUS_TEXT="+probe)
+	var out strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("wake command did not answer within %s — it may be blocked on stdin or the network", timeout)
+	}
 	if err != nil {
 		return fmt.Errorf("wake command failed its self-test: %w", err)
 	}
-	if strings.TrimSpace(out) == "" {
+	if strings.TrimSpace(out.String()) == "" {
 		return fmt.Errorf("wake command ran but produced no answer — the rider would be deaf")
 	}
 	return nil
