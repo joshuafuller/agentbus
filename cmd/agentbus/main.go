@@ -260,13 +260,32 @@ func dial(ticket string) (net.Conn, error) {
 	return c.DialTCPPort(ctx, busPort)
 }
 
+// riderDir is a participant's home: conversation state, task store,
+// and identity key all live here, keyed by bus name.
+func riderDir(name string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".agentbus", "rider-"+name), nil
+}
+
 func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 	conn, err := dial(ticket)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	fmt.Fprintf(conn, "%s\n", bus.Hello(name))
+	// Every join is keyed (issue #6): the first join under a name binds
+	// it (TOFU) and every later connection must prove the same key.
+	rdir, err := riderDir(name)
+	if err != nil {
+		return err
+	}
+	key, err := bus.LoadOrCreateKey(rdir)
+	if err != nil {
+		return err
+	}
 
 	// The conn is written from stdin forwarding, and — when this join
 	// is a wired rider — from task goroutines reporting state. Guard it
@@ -309,6 +328,9 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 	}()
 
 	sc := bufio.NewScanner(conn)
+	if err := bus.ClientHello(conn, sc, name, false, key); err != nil {
+		return err
+	}
 	// At-least-once delivery: the hub redelivers unACKed envelopes, so
 	// remember recent ids and re-ACK duplicates without reprocessing.
 	seen := bus.NewDedup(1024)
@@ -404,13 +426,28 @@ func runSend(ticket, name, msg string) error {
 		return err
 	}
 	defer conn.Close()
-	fmt.Fprintf(conn, "%s\n", bus.HelloOneshot(name))
-
+	// Authenticate when we hold this name's key (an operator sending
+	// under their rider's name on the same host); a bound name refuses
+	// unkeyed sends outright (issue #6).
+	rdir, err := riderDir(name)
+	if err != nil {
+		return err
+	}
+	key, err := bus.LoadKeyIfExists(rdir)
+	if err != nil {
+		return err
+	}
+	sc := bufio.NewScanner(conn)
+	if err := bus.ClientHello(conn, sc, name, true, key); err != nil {
+		return err
+	}
 	// Wait for the welcome so we know the hub registered us before we
 	// send; otherwise the message could relay before registration.
-	sc := bufio.NewScanner(conn)
 	if !sc.Scan() {
 		return fmt.Errorf("bus closed the connection")
+	}
+	if !strings.Contains(sc.Text(), "welcome aboard") {
+		return fmt.Errorf("bus refused this connection: %s", sc.Text())
 	}
 	for _, line := range strings.Split(msg, "\n") {
 		if line = strings.TrimSpace(line); line != "" {

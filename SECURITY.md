@@ -42,7 +42,7 @@ Two parties are outside your control:
 | # | Threat | Severity | Status |
 |---|--------|----------|--------|
 | T1 | Ticket holder triggers autonomous code execution on a rider | CRITICAL (by design) | Documented; mitigated by ticket secrecy + runtime sandbox + rider briefing scope |
-| T2 | Sender/name spoofing — a rider claims to be `operator` or another agent | HIGH | Open; names are unauthenticated. Mitigation: rider briefing tells the agent to scope by task content, not by claimed sender |
+| T2 | Sender/name spoofing — a rider claims to be `operator` or another agent | HIGH | Largely closed for KEY-BOUND names (issue #6): TOFU binds a name to an Ed25519 key; every later connection — one-shot senders included — must answer a fresh challenge or is refused. Names never claimed by a key remain unauthenticated (legacy); the briefing mitigation still applies to them |
 | T3 | Shell injection via `--name` / `--model` into the wire command | HIGH | **Fixed** — names validated against `^[A-Za-z0-9._-]{1,64}$` at every entry point |
 | T4 | Boarding pass runs remote code (installer, wiring) on a fresh agent | MEDIUM | Mitigated — pass is operator-framed and uses download → review → run, never blind `curl \| sh` |
 | T5 | Plaintext bus history on disk (inbox, rider join.log) | MEDIUM | Mitigated — rider dir `0700`, inbox & log `0600` |
@@ -73,17 +73,25 @@ interpolated into the shell command. Verified by test
 (`TestSinkOnMsgEnv`). The injection risk is prompt-level, into the agent,
 not shell-level.
 
-### T2 — no sender authentication
+### T2 — sender authentication (TOFU key binding)
 
-Names are chosen by operators and only *uniqueness*-arbitrated by the hub
-for **riders** (a new join under an existing name supersedes the old
-connection). One-shot `send` connections are **not** arbitrated at all, so
-two connections — even a rider and an operator-side `send` on the same host
-— can freely share one name. Nothing stops a ticket holder from sending as
-`[operator]`. An autonomous rider that trusts "TASK from operator" can be
-socially engineered by any bus participant. Until an identity layer exists,
-the briefing tells riders to judge by task content, and you should not put a
-rider that trusts sender identity on a bus with untrusted participants.
+Since issue #6 landed, the first rider to prove an Ed25519 key under a
+name **binds** it for the life of the bus (trust on first use, announced
+on the feed). Every later connection under a bound name — including
+one-shot `send`s, which caused the original incident — must answer a
+fresh per-connection challenge (signature over `"agentbus-join-v1" ||
+nonce || name`) with the bound key, or it is refused with a visible
+notice on both ends. `join` always presents a key; `send`/`task` present
+it when the caller holds the name's key file.
+
+What this does NOT close: names that no key has ever claimed remain
+unauthenticated (backwards compatibility) — a ticket holder can still
+send under an unbound name; TOFU means the FIRST claim is unverified (a
+ticket holder who claims a name before its owner does owns it until the
+bus restarts); and key custody is a file (`id_ed25519`, 0600) — host
+compromise is key compromise. For riders on unbound names the old rule
+stands: judge by task content, and do not put a rider that trusts sender
+identity on a bus with untrusted participants.
 
 **Observed, not theoretical (2026-08-27, issue #3).** During the first
 multi-host dogfooding session, mutually inconsistent message streams arrived

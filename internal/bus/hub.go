@@ -2,6 +2,7 @@ package bus
 
 import (
 	"bufio"
+	"crypto/ed25519"
 	"fmt"
 	"net"
 	"os"
@@ -41,6 +42,12 @@ type Hub struct {
 
 	mu    sync.Mutex
 	peers map[net.Conn]peer
+
+	// bindings is the TOFU table (issue #6): name → the public key that
+	// first claimed it, for the life of the bus. A bound name accepts
+	// only connections that prove possession of that key via the fresh
+	// per-connection challenge; the ticket admits, the key identifies.
+	bindings map[string]ed25519.PublicKey
 }
 
 // maxLineBytes bounds a single bus line. Generous for real messages
@@ -68,7 +75,8 @@ type peer struct {
 // NewHub returns a hub for a host participating under name.
 // sink, if non-nil, receives every relayed message line (never notices).
 func NewHub(name string, sink func(line string) bool) *Hub {
-	return &Hub{name: name, sink: sink, peers: make(map[net.Conn]peer)}
+	return &Hub{name: name, sink: sink, peers: make(map[net.Conn]peer),
+		bindings: make(map[string]ed25519.PublicKey)}
 }
 
 // enqueue hands one line to a peer's writer without ever blocking the
@@ -117,9 +125,61 @@ func (h *Hub) Serve(conn net.Conn) {
 	if !sc.Scan() {
 		return
 	}
-	name, oneshot, ok := ParseHello(sc.Text())
+	name, oneshot, pub, ok := ParseHelloKeyed(sc.Text())
 	if !ok {
 		return
+	}
+
+	// Identity gate (issue #6). Runs BEFORE registration, so a refused
+	// connection never displaces the legitimate holder and the direct
+	// writes below race nothing. Three cases:
+	//   keyed hello  → fresh-nonce challenge; the signature must verify
+	//                  and, if the name is bound, the key must match.
+	//   unkeyed, name bound → refused: the name belongs to a key now.
+	//   unkeyed, unbound    → legacy path, unchanged.
+	if pub != nil {
+		nonce, err := NewNonce()
+		if err != nil {
+			return
+		}
+		conn.SetDeadline(time.Now().Add(15 * time.Second))
+		fmt.Fprintf(conn, "%s\n", Challenge(nonce))
+		if !sc.Scan() {
+			return
+		}
+		sig, sok := ParseSig(sc.Text())
+		if !sok || !VerifyChallenge(pub, nonce, name, sig) {
+			fmt.Fprintf(conn, "%s\n", Notice("refused — signature does not prove the presented key"))
+			h.notice(fmt.Sprintf("refused a join as %s: bad signature", name), nil)
+			return
+		}
+		conn.SetDeadline(time.Time{})
+		h.mu.Lock()
+		bound, has := h.bindings[name]
+		switch {
+		case has && !bound.Equal(pub):
+			h.mu.Unlock()
+			fmt.Fprintf(conn, "%s\n", Notice("refused — "+name+" is bound to a different key"))
+			h.notice(fmt.Sprintf("refused a join as %s: wrong key for a bound name", name), nil)
+			return
+		case !has && !oneshot:
+			// Trust on first use: the first RIDER to claim the name
+			// binds it. Oneshot senders prove keys but never bind.
+			h.bindings[name] = pub
+			h.mu.Unlock()
+			h.notice(fmt.Sprintf("%s is now key-bound (trust on first use)", name), nil)
+		default:
+			h.mu.Unlock()
+		}
+	} else {
+		h.mu.Lock()
+		_, has := h.bindings[name]
+		h.mu.Unlock()
+		if has {
+			fmt.Fprintf(conn, "%s\n", Notice("refused — "+name+" is key-bound; connect with its key"))
+			h.notice(fmt.Sprintf("refused an unkeyed connection as %s: name is key-bound", name), nil)
+			return
+		}
 	}
 
 	out := make(chan string, outboxDepth)

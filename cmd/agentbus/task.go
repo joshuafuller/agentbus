@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/ed25519"
 	"fmt"
 	"io"
 	"net"
@@ -34,7 +35,12 @@ func runTask(ticket, name, rider, prompt string, timeout time.Duration) error {
 		fmt.Fprintf(os.Stderr, "agentbus: could not reach the bus: %v\n", err)
 		os.Exit(2)
 	}
-	code := runTaskConn(conn, name, rider, prompt, timeout, os.Stdout)
+	rdir, rerr := riderDir(name)
+	var key ed25519.PrivateKey
+	if rerr == nil {
+		key, _ = bus.LoadKeyIfExists(rdir)
+	}
+	code := runTaskConn(conn, name, rider, prompt, timeout, key, os.Stdout)
 	os.Exit(code)
 	return nil
 }
@@ -45,17 +51,25 @@ func runTask(ticket, name, rider, prompt string, timeout time.Duration) error {
 // unclosed tunnel conn leaves a ghost peer on the hub that swallows
 // every line addressed to this name — results would reach the ghost
 // instead of the spool.
-func runTaskConn(conn net.Conn, name, rider, prompt string, timeout time.Duration, out io.Writer) int {
+func runTaskConn(conn net.Conn, name, rider, prompt string, timeout time.Duration, key ed25519.PrivateKey, out io.Writer) int {
 	defer conn.Close()
 	deadline := time.Now().Add(timeout)
 	conn.SetReadDeadline(deadline)
 
-	fmt.Fprintf(conn, "%s\n", bus.Hello(name))
-	br := bufio.NewReader(conn)
+	hello := bufio.NewScanner(conn)
+	hello.Buffer(make([]byte, 0, 64*1024), 256*1024)
+	if err := bus.ClientHello(conn, hello, name, false, key); err != nil {
+		fmt.Fprintf(out, "identity handshake failed: %v\n", err)
+		return 2
+	}
 	// The welcome confirms the hub registered us; only then may we send,
 	// or the reply could relay before we can receive it.
-	if _, err := br.ReadString('\n'); err != nil {
-		fmt.Fprintf(out, "no welcome from the bus: %v\n", err)
+	if !hello.Scan() {
+		fmt.Fprintf(out, "no welcome from the bus\n")
+		return 2
+	}
+	if !strings.Contains(hello.Text(), "welcome aboard") {
+		fmt.Fprintf(out, "bus refused this connection: %s\n", hello.Text())
 		return 2
 	}
 
@@ -73,8 +87,7 @@ func runTaskConn(conn net.Conn, name, rider, prompt string, timeout time.Duratio
 	go func() {
 		defer pw.Close()
 		seen := bus.NewDedup(256)
-		sc := bufio.NewScanner(br)
-		sc.Buffer(make([]byte, 0, 64*1024), 256*1024)
+		sc := hello // continue on the same buffered scanner
 		for sc.Scan() {
 			line := sc.Text()
 			if from, body, ok := bus.ParseMessage(line); ok {
