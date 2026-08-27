@@ -225,6 +225,9 @@ func TestBlobReceiverRejectsCorruptTransfer(t *testing.T) {
 			t.Fatalf("corrupt blob landed on disk as %s", e.Name())
 		}
 	}
+	if _, ok := r.open["x"]; ok {
+		t.Fatal("corrupt transfer remained in the open table")
+	}
 	if len(notes) != 1 || !strings.Contains(notes[0], "corrupt") {
 		t.Fatalf("driver never told about the corrupt transfer: %v", notes)
 	}

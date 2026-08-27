@@ -310,7 +310,10 @@ func (r *BlobReceiver) chunk(id string, seq int, data []byte) bool {
 func (r *BlobReceiver) abort(x *blobXfer, why string) bool {
 	x.refused = true
 	r.rejected[x.hdr.ID] = struct{}{}
-	x.file.Close()
+	delete(r.open, x.hdr.ID)
+	if x.file != nil {
+		x.file.Close()
+	}
 	os.Remove(filepath.Join(r.dir, ".partial", x.hdr.ID))
 	r.note(fmt.Sprintf("discarded a corrupt transfer of %s from %s (%s)", x.hdr.Name, x.from, why))
 	r.receipt(x, false, why)
