@@ -64,6 +64,13 @@ func TestBlobChunkRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBlobChunkRejectsUnsafeID(t *testing.T) {
+	line := BlobChunk("../../outside", 1, []byte("data"))
+	if _, _, _, ok := ParseBlobChunk(line); ok {
+		t.Fatal("unsafe blob chunk ID accepted")
+	}
+}
+
 // The receiver: frames in, one file plus one notification line out.
 func TestBlobReceiverWritesContentAddressedFileAndNotifiesOnce(t *testing.T) {
 	dir := t.TempDir()
@@ -96,6 +103,25 @@ func TestBlobReceiverWritesContentAddressedFileAndNotifiesOnce(t *testing.T) {
 		if !strings.Contains(n, part) {
 			t.Fatalf("notification %q missing %q", n, part)
 		}
+	}
+}
+
+func TestBlobReceiverCompletionIsConsumableAfterPublish(t *testing.T) {
+	r := NewBlobReceiver(t.TempDir(), 0, func(string) {})
+	frames := BlobFrames("transfer-1", "f.bin", []byte("data"), 4)
+	if r.TakeCompleted("transfer-1") {
+		t.Fatal("unpublished transfer reported complete")
+	}
+	for _, frame := range frames {
+		if consumed, ok := r.Offer("sender", frame); !consumed || !ok {
+			t.Fatalf("receiver refused frame %q", frame)
+		}
+	}
+	if !r.TakeCompleted("transfer-1") {
+		t.Fatal("published transfer did not report complete")
+	}
+	if r.TakeCompleted("transfer-1") {
+		t.Fatal("completion signal was not consumed")
 	}
 }
 

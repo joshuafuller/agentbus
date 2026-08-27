@@ -97,6 +97,9 @@ func ParseBlobChunk(line string) (id string, seq int, data []byte, ok bool) {
 	if len(f) != 5 || f[0] != "BLOB" || f[1] != "C" {
 		return "", 0, nil, false
 	}
+	if !validBlobID(f[2]) {
+		return "", 0, nil, false
+	}
 	seq, err := strconv.Atoi(f[3])
 	if err != nil || seq < 1 {
 		return "", 0, nil, false
@@ -140,8 +143,9 @@ type BlobReceiver struct {
 	// sender: "BLOB OK <id>" on success, "BLOB ERR <id> <why>" on
 	// refusal or corruption. It lets `put` block until the bytes have
 	// actually landed instead of racing the connection close.
-	Reply func(to, line string)
-	open  map[string]*blobXfer
+	Reply     func(to, line string)
+	open      map[string]*blobXfer
+	completed map[string]struct{}
 }
 
 // BlobReceipt formats a delivery receipt (receiver → sender).
@@ -183,7 +187,18 @@ func NewBlobReceiver(dir string, maxBytes int64, note func(string)) *BlobReceive
 	if maxBytes <= 0 {
 		maxBytes = defaultBlobCap
 	}
-	return &BlobReceiver{dir: dir, cap: maxBytes, note: note, open: map[string]*blobXfer{}}
+	return &BlobReceiver{dir: dir, cap: maxBytes, note: note, open: map[string]*blobXfer{}, completed: map[string]struct{}{}}
+}
+
+// TakeCompleted reports and clears a transfer that was durably published.
+// It lets the envelope owner ACK every frame only after the final frame has
+// made the completed blob visible on disk.
+func (r *BlobReceiver) TakeCompleted(id string) bool {
+	if _, ok := r.completed[id]; !ok {
+		return false
+	}
+	delete(r.completed, id)
+	return true
 }
 
 // Offer inspects one payload. consumed reports whether it was a blob
@@ -282,6 +297,7 @@ func (r *BlobReceiver) finish(x *blobXfer) bool {
 		return false
 	}
 	delete(r.open, x.hdr.ID)
+	r.completed[x.hdr.ID] = struct{}{}
 	r.note(fmt.Sprintf("[%s] FILE %s %s %dB → %s", x.from, got[:8], x.hdr.Name, x.got, final))
 	r.receipt(x, true, "")
 	return true

@@ -384,6 +384,7 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 	// At-least-once delivery: the hub redelivers unACKed envelopes, so
 	// remember recent ids and re-ACK duplicates without reprocessing.
 	seen := bus.NewDedup(1024)
+	blobEnvelopes := map[string]map[string]struct{}{}
 	for sc.Scan() {
 		line := sc.Text()
 		if bus.IsNotice(line) {
@@ -411,13 +412,24 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 					continue
 				}
 				// A blob frame is spooled out of band, not delivered to
-				// the agent. ACK only once the receiver accepts it, the
-				// same at-least-once contract as chat.
+				// the agent. Hold every frame ACK until the receiver has
+				// durably published the complete blob.
 				if blobs != nil {
 					if consumed, ok := blobs.Offer(from, payload); consumed {
-						if ok {
-							seen.Seen(id)
-							sendLine(bus.Ack(id))
+						if blobID := blobFrameID(payload); blobID != "" {
+							pending := blobEnvelopes[blobID]
+							if pending == nil {
+								pending = map[string]struct{}{}
+								blobEnvelopes[blobID] = pending
+							}
+							pending[id] = struct{}{}
+							if ok && blobs.TakeCompleted(blobID) {
+								for envelopeID := range pending {
+									seen.Seen(envelopeID)
+									sendLine(bus.Ack(envelopeID))
+								}
+								delete(blobEnvelopes, blobID)
+							}
 						}
 						continue
 					}
@@ -478,6 +490,16 @@ func runAwait(inbox string) error {
 		fmt.Println(l)
 	}
 	return nil
+}
+
+func blobFrameID(payload string) string {
+	if h, ok := bus.ParseBlobHeader(payload); ok {
+		return h.ID
+	}
+	if id, _, _, ok := bus.ParseBlobChunk(payload); ok {
+		return id
+	}
+	return ""
 }
 
 func runSend(ticket, name, msg string) error {
