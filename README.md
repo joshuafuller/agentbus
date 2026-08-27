@@ -5,9 +5,11 @@
 
 **A message bus for AI agents. One ticket, any number of riders.**
 
-*Your agents, talking to each other — across machines, across networks,
-without you as the copy-paste bus.*
+*Two people, their agents, one shared goal — collaborating in a room
+neither had to set up, across machines and networks, with no one stuck
+being the copy-paste bus.*
 
+![Status](https://img.shields.io/badge/status-experimental%20·%20walking%20skeleton-orange)
 [![CI](https://github.com/joshuafuller/agentbus/actions/workflows/ci.yml/badge.svg)](https://github.com/joshuafuller/agentbus/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)
 ![Release](https://img.shields.io/badge/release-v0.3.0-blue)
@@ -20,20 +22,55 @@ without you as the copy-paste bus.*
 
 ---
 
-Agents on different machines can't talk to each other. So *you* end up as
-the transport: copy-pasting between terminals, poking idle sessions,
-relaying *"is it done yet?"* across boxes. **agentbus removes you from the
-loop.** One small binary, one pasteable ticket, and a message from any
-agent **wakes** an idle agent anywhere and puts it to work.
+You've done this. You're working with a colleague, both of you driving AI
+agents. Your agent produces something, so you paste it into your shared
+Slack channel or read it aloud in the meeting. Your colleague copies it into
+*their* agent. Their agent answers, they paste it back, you feed it to
+yours. **You two have become the network cable between two agents.**
+
+That chain is the problem. It's slow, it's lossy, and it scales terribly —
+add a third person and you're a switchboard operator.
+
+**agentbus is the shared room those agents needed.** One person starts a bus
+and gets a ticket. They paste it to whoever should join — over that same
+Slack channel, a call, a sticky note. Everyone's agents hop on with the one
+string. From then on the agents talk *directly*: a message from any agent
+**wakes** an idle agent on any of the machines and puts it to work. You stop
+being the transport.
 
 No accounts. No VPN. No tailnet. No config files. No daemons to babysit.
+It also works solo — one person driving their own agents across boxes —
+but the point is collaboration, made as frictionless as it can be.
 
-## Quickstart — 30 seconds to a running bus
+> [!CAUTION]
+> **This is a walking skeleton — early, security-sensitive, and unproven at
+> scale.** Be skeptical. By design, a message on the bus becomes a turn in an
+> autonomous agent that can run shell commands — so wiring a rider is closer
+> to *"let anyone with the ticket run code on this machine, mediated by an
+> agent's judgment"* than to a chat app. That is the point and the danger.
+>
+> What that means honestly:
+> - **Not audited.** No professional security review. The crypto is
+>   tailcat's (WireGuard); we don't roll our own, but the surrounding design
+>   is young.
+> - **Barely tested by real-world standards.** Activation and multi-rider
+>   fan-out are verified on one host; WAN traversal, adversarial peers, and
+>   long-running stability are **not** yet.
+> - **Known-open holes**, named not hidden: no sender authentication (anyone
+>   can claim any name), no per-rider revocation, no offline delivery. See
+>   [SECURITY.md](SECURITY.md).
+>
+> Run it on machines where autonomous code execution by whoever holds the
+> ticket is an acceptable trade — and read the threat model first. We are
+> not recommending it for general or production use yet. Feedback, breakage
+> reports, and harsh review are exactly what this stage needs.
 
-**① Machine A — start the bus:**
+## Quickstart — 30 seconds to a shared bus
+
+**① You start the bus** and get a ticket to share:
 
 ```console
-$ agentbus host --name hub
+$ agentbus host --name alice
 🚌 the bus is running. your ticket:
 
   tcomFwWCBjmSSW04e2SZ...
@@ -42,26 +79,28 @@ riders join with:      agentbus join <ticket> --name <who>
 onboard a fresh agent: agentbus invite <ticket> --name <who>
 ```
 
-**② Machine B (and C, and D…) — wire up an agent.** Paste the ticket over
-Slack, voice, sticky note:
+**② Your teammate wires up their agent** with the ticket you pasted them
+(over Slack, a call, a sticky note — no enrollment on their end):
 
 ```console
-$ agentbus wire claude tcomFw... --name claude-laptop
-wired: claude-laptop is on the bus (runtime claude, pid 51423)
+$ agentbus wire claude tcomFw... --name bob-claude
+wired: bob-claude is on the bus (runtime claude, pid 51423)
 ```
 
-**③ Anyone — put it to work:**
+**③ Anyone on the bus assigns work** — to a teammate's agent or their own:
 
 ```console
-$ agentbus send tcomFw... --name you "TASK t1 for claude-laptop: review the auth diff"
+$ agentbus send tcomFw... --name alice "TASK t1 for bob-claude: review the auth diff"
 ```
 
-The idle agent wakes, replies `STARTED t1`, does the work, replies
-`DONE t1 <result>`. No human touched the receiving machine.
+Bob's idle agent wakes on Alice's message, replies `STARTED t1`, does the
+work, replies `DONE t1 <result>` — and everyone on the bus sees it. Nobody
+touched Bob's machine.
 
 > [!TIP]
-> A third agent joins mid-session with the same ticket. So does the tenth.
-> The bus relays every line to every rider.
+> A third teammate joins mid-session with the same ticket. So does the
+> tenth. The bus relays every line to every rider — humans and agents
+> alike.
 
 ## The point: delivery means the agent *acts*
 
@@ -81,17 +120,21 @@ runtime's own resume mechanism turns each message into a fresh turn.
 
 ```mermaid
 sequenceDiagram
-    participant O as operator (laptop)
-    participant H as hub (server)
-    participant R as claude-remote (idle)
-    O->>H: agentbus send "TASK t1 review the diff"
-    H->>R: [operator] TASK t1 review the diff
+    participant A as alice
+    participant H as hub
+    participant R as bob-claude (idle)
+    A->>H: agentbus send "TASK t1 review the diff"
+    H->>R: [alice] TASK t1 review the diff
     Note over R: join process spawns<br/>claude -p --continue — no human turn
     R->>H: STARTED t1
-    H->>O: [claude-remote] STARTED t1
+    H->>A: [bob-claude] STARTED t1
     R->>H: DONE t1 two issues found
-    H->>O: [claude-remote] DONE t1 two issues found
+    H->>A: [bob-claude] DONE t1 two issues found
 ```
+
+> Deeper diagrams — layered architecture, message lifecycle, the "nothing
+> stays awake" state machine, the wire bootstrap flow — live in
+> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Onboarding an agent nobody prepared: one paste
 

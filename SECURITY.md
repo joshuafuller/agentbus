@@ -11,7 +11,7 @@ This document is the whole-project threat model, not only secret handling.
 ## Trust boundaries
 
 ```
-operator ──(chooses names, flags,     ┌─────────────┐
+operator ──(chooses names, flags,      ┌─────────────┐
              wires riders)────────────▶│  local CLI  │
                                        └──────┬──────┘
 ticket holder ──(any bus message)──▶ WireGuard tunnel (tailcat)

@@ -1,0 +1,100 @@
+# Wire protocol (v0)
+
+The bus protocol is newline-delimited UTF-8 text over a single tailcat
+stream on virtual TCP port `2255`. It is intentionally trivial: every line
+is human-readable and debuggable with `cat`. This is a v0 protocol with no
+stability promise.
+
+## Lines
+
+A line is a sequence of UTF-8 bytes terminated by `\n`. The hub caps a
+single line at **256 KB**; a longer line ends the offending connection and
+does not affect other riders.
+
+### Greeting (client → hub, first line)
+
+```
+HELLO <name>
+HELLO <name> oneshot
+```
+
+- `<name>` must match `^[A-Za-z0-9._-]{1,64}$` (`ValidName`). Names outside
+  this set are rejected — they reach shells and file paths, so the charset
+  is conservative by design.
+- Plain `HELLO` registers a **rider**: it receives relayed messages and
+  notices, counts toward the bus population, and a later `HELLO` under the
+  same name supersedes it.
+- `HELLO <name> oneshot` registers a **one-shot sender**: it may write
+  messages but receives no relays and no notices, never displaces a rider,
+  and is not counted. The `send` command uses this.
+
+The hub replies with a welcome notice; reading it confirms registration
+(so a sender can safely write immediately after):
+
+```
+* welcome aboard, <name> — <N> on the bus
+```
+
+### Message (either direction)
+
+From a client, a message is just the raw text line (anything not starting
+with the `HELLO` greeting). The hub stamps the sender and relays it:
+
+```
+[<sender>] <text>
+```
+
+Relay rules:
+- delivered to every rider whose name differs from the sender (a rider's
+  own name never receives its own messages, even across two connections);
+- delivered to the host's local sink (inbox / `--on-msg`), unless the
+  sender *is* the host;
+- **not** delivered to one-shot senders.
+
+### Notice (hub → clients)
+
+```
+* <text>
+```
+
+Notices carry presence and status (`… hopped on the bus`, `… reconnected`,
+`… hopped off the bus`, the welcome line). They are shown to humans and
+**never** delivered to an agent's activation path — so a rider joining can
+never be mistaken for a task. `IsNotice` is the single predicate.
+
+## Task lifecycle (convention, not protocol)
+
+The bus does not parse or enforce these — they are ordinary messages that
+tools and agents agree on:
+
+```
+TASK <id> <description>      assign work (optionally "for <name>")
+STARTED <id>                 acknowledge, work beginning
+DONE <id> <result summary>   work complete
+```
+
+A missing `DONE` after a reasonable time means the message was lost or the
+rider is stuck: resend. There is no delivery receipt in v0.
+
+## Activation delivery
+
+On the receiving side, a message line is turned into agent activation by
+one of:
+
+- **`--inbox <file>`** — the line is appended (file mode `0600`). A watcher
+  (`agentbus await`, or Claude Code's Monitor) fires on the append. `await`
+  tracks a read offset in `<file>.pos` so pending lines are returned
+  immediately and never re-read.
+- **`--on-msg <cmd>`** — `<cmd>` is run via `sh -c`, with the message in
+  the environment (`AGENTBUS_MSG` = full `[sender] text`, `AGENTBUS_FROM`,
+  `AGENTBUS_TEXT`). Content is passed as environment variables, never
+  interpolated into the command string — there is no shell-injection
+  surface from remote content.
+
+## Transport
+
+Framing above is independent of transport. The transport is
+[tailcat](https://github.com/tailscale/tailcat): the ticket (`tc…`) encodes
+the host's public key and relay info; `Client.DialTCPPort(2255)` opens a
+WireGuard-encrypted QUIC stream to the host's `OnTCP` handler, which hands
+the `net.Conn` to `Hub.Serve`.
