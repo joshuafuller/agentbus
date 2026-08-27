@@ -266,9 +266,10 @@ about.
 ## Honest limits
 
 - **Star topology.** Host dies → bus gone. Riders rejoin a new ticket.
-- **Offline delivery is host-local and bounded.** Addressed lines for absent
-  names spool for 24 hours and flush on rejoin; broadcast messages remain
-  ephemeral, and delivery is at-most-once during a flush.
+- **Offline delivery is host-local and bounded.** Addressed lines spool durably
+  for 24 hours and are delivered as envelopes requiring receiver ACKs; unACKed
+  envelopes are redelivered, so delivery is at-least-once with receiver-side
+  deduplication by envelope ID. Broadcast messages remain ephemeral.
 - **Same-host ≠ WAN proof.** The tunnel is real either way, but if you
   need cross-network guarantees, test across your actual networks.
 - **Pinned dependency.** tailcat makes no API stability promises; agentbus
