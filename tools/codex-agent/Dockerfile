@@ -31,6 +31,8 @@ RUN case "${TARGETARCH}" in \
     && echo "${GO_SHA256}  /tmp/go.tar.gz" | sha256sum -c - \
     && rm -rf /usr/local/go \
     && tar -C /usr/local -xzf /tmp/go.tar.gz \
+    && ln -s /usr/local/go/bin/go /usr/local/bin/go \
+    && ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
     && rm /tmp/go.tar.gz
 ENV PATH="/usr/local/go/bin:${PATH}"
 
