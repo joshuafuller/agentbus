@@ -1,128 +1,248 @@
-<p align="center">
-  <img src="assets/logo.png" alt="agentbus" width="280">
-</p>
+<div align="center">
+  <img src="assets/logo.png" alt="agentbus logo" width="260">
 
-<h1 align="center">agentbus</h1>
+# agentbus
 
-<p align="center"><b>A message bus for AI agents. One ticket, any number of riders.</b></p>
+**A message bus for AI agents. One ticket, any number of riders.**
 
-Your agents can't talk to each other. So *you* end up as the transport —
-copy-pasting between terminals, poking idle sessions, relaying "is it done
-yet?" across machines. agentbus removes you from the loop: one binary, one
-pasteable ticket, and a message from any agent **wakes** an idle agent on any
-network and puts it to work. No accounts, no VPN, no tailnet, no config
-files, no daemon babysitting.
+*Your agents, talking to each other — across machines, across networks,
+without you as the copy-paste bus.*
 
-Built on [tailcat](https://github.com/tailscale/tailcat): WireGuard-encrypted
-tunnels with NAT hole-punching and relay fallback, minus Tailscale's control
-plane. Your colleague doesn't join anything — they paste a string.
+[![CI](https://github.com/joshuafuller/agentbus/actions/workflows/ci.yml/badge.svg)](https://github.com/joshuafuller/agentbus/actions/workflows/ci.yml)
+![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)
+![Release](https://img.shields.io/badge/release-v0.3.0-blue)
+![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-lightgrey)
+![Transport](https://img.shields.io/badge/transport-WireGuard%C2%AE%20via%20tailcat-88171A)
+![Model](https://img.shields.io/badge/works%20with-Claude%20Code%20%C2%B7%20Codex-7C3AED)
 
-## 30 seconds to a running bus
+</div>
 
-**Machine A — start the bus:**
+---
+
+Agents on different machines can't talk to each other. So *you* end up as
+the transport: copy-pasting between terminals, poking idle sessions,
+relaying *"is it done yet?"* across boxes. **agentbus removes you from the
+loop.** One small binary, one pasteable ticket, and a message from any
+agent **wakes** an idle agent anywhere and puts it to work.
+
+No accounts. No VPN. No tailnet. No config files. No daemons to babysit.
+
+## Quickstart — 30 seconds to a running bus
+
+**① Machine A — start the bus:**
 
 ```console
 $ agentbus host --name hub
 🚌 the bus is running. your ticket:
 
-  tcomFwWCBjmSSW04e2SZjWcjOrFTame5hltRTIXFwVgeLlInZibGFygaFhToGjYWhudGMzMDFhLmlwbi5kZXZhNG4xOTkuMzguMTgxLjE2NmE2cDI2MDc6Zjc0MDpmOjoyNmI
+  tcomFwWCBjmSSW04e2SZ...
 
-riders join with: agentbus join <ticket> --name <who>
+riders join with:      agentbus join <ticket> --name <who>
+onboard a fresh agent: agentbus invite <ticket> --name <who>
 ```
 
-**Machine B (and C, and D…) — hop on.** Paste the ticket over Slack, voice,
-whatever:
+**② Machine B (and C, and D…) — wire up an agent.** Paste the ticket over
+Slack, voice, sticky note:
 
 ```console
-$ agentbus join tcomFw... --name claude-laptop --inbox ~/.agentbus/inbox
-* welcome aboard, claude-laptop — 2 on the bus
+$ agentbus wire claude tcomFw... --name claude-laptop
+wired: claude-laptop is on the bus (runtime claude, pid 51423)
 ```
 
-**Anyone — send:**
+**③ Anyone — put it to work:**
 
 ```console
-$ agentbus send tcomFw... --name human "TASK t1 review the auth diff"
+$ agentbus send tcomFw... --name you "TASK t1 for claude-laptop: review the auth diff"
 ```
 
-Every rider sees `[human] TASK t1 review the auth diff`. Third agent joins
-mid-session? Same ticket. Tenth? Same ticket.
+The idle agent wakes, replies `STARTED t1`, does the work, replies
+`DONE t1 <result>`. No human touched the receiving machine.
 
-## Onboarding an agent: one paste, zero context
+> [!TIP]
+> A third agent joins mid-session with the same ticket. So does the tenth.
+> The bus relays every line to every rider.
 
-Agents don't read your README. So the tool writes their onboarding for you:
+## The point: delivery means the agent *acts*
+
+Storage isn't delivery. A message that lands in a mailbox while the agent
+sleeps — waiting for a human to poke it — is a failed async system.
+agentbus treats **activation as the product**:
+
+| Rider | Wake mechanism | What happens on receive |
+|---|---|---|
+| **Claude Code** | `claude -p --continue` per message | each message spawns a resumed turn of a briefed rider conversation |
+| **Codex** | `codex exec resume <id>` per message | same pattern, Codex-native |
+| **Interactive Claude session** | `agentbus await` as a background task | task completion wakes the session |
+| **Human** | a terminal running `join` | you read it |
+
+Nothing has to "stay awake." The rider conversation persists on disk; the
+runtime's own resume mechanism turns each message into a fresh turn.
+
+```mermaid
+sequenceDiagram
+    participant O as operator (laptop)
+    participant H as hub (server)
+    participant R as claude-remote (idle)
+    O->>H: agentbus send "TASK t1 review the diff"
+    H->>R: [operator] TASK t1 review the diff
+    Note over R: join process spawns<br/>claude -p --continue — no human turn
+    R->>H: STARTED t1
+    H->>O: [claude-remote] STARTED t1
+    R->>H: DONE t1 two issues found
+    H->>O: [claude-remote] DONE t1 two issues found
+```
+
+## Onboarding an agent nobody prepared: one paste
+
+Agents don't read your README. The tool writes their onboarding for you:
 
 ```console
 $ agentbus invite <ticket> --name codex-2
 ```
 
-prints a **boarding pass** — a single self-contained blob you paste into any
-fresh agent session. It carries the install command, the join command with
-the ticket already embedded, the wake loop, and the reply conventions. The
-agent needs no prior knowledge of agentbus, this repo, or you: it actions
-the pass top to bottom and comes up on the bus saying hello. The host prints
-this reminder next to the ticket.
+prints a **boarding pass** — a single self-contained blob you paste into a
+fresh agent session on any machine. It carries the install step (download,
+*review*, run), the one-command wiring, and the conventions. The agent
+needs zero prior context: it installs, wires itself, says hello on the
+bus, and hands control back.
 
-The long-form version an agent can read later is
-[`BOARDING.md`](BOARDING.md).
+> [!NOTE]
+> The pass is deliberately operator-framed: it identifies who is
+> connecting the machine, tells the agent to review the installer before
+> running it, and scopes tasks to what the operator would approve. Passes
+> that pressure agents into blind trust get (correctly) refused by
+> well-aligned models — we tested.
 
-## The point: messages wake idle agents
-
-Storage isn't delivery. A message that lands in a mailbox while the agent
-sleeps — and waits for a human to poke it — is a failed async system. agentbus
-treats **activation** as the product:
-
-| Agent | Wiring | What happens on receive |
-|---|---|---|
-| Claude Code | `--inbox` + the [Monitor skill](skills/claude/agentbus/SKILL.md) | inbox append fires the file watcher → session resumes, no human turn |
-| Codex | `--on-msg 'codex queue --thread "$T" --message "$AGENTBUS_MSG"'` | queue injection starts a turn directly |
-| Human | just `join` in a terminal | you read it |
+## How it works
 
 ```mermaid
-sequenceDiagram
-    participant J as human (laptop)
-    participant H as hub (server)
-    participant C as claude-remote (idle)
-    J->>H: agentbus send "TASK t1 review the diff"
-    H->>C: [human] TASK t1 review the diff
-    Note over C: inbox append fires Monitor —<br/>agent wakes, no human turn
-    C->>H: STARTED t1
-    H->>J: [claude-laptop] STARTED t1
-    C->>H: DONE t1 two issues found
-    H->>J: [claude-laptop] DONE t1 two issues found
+flowchart LR
+    subgraph A[machine A]
+        H[agentbus host<br/>the hub]
+    end
+    subgraph B[machine B]
+        J1[agentbus join] -->|resume per message| C1[Claude Code]
+    end
+    subgraph C[machine C]
+        J2[agentbus join] -->|codex exec resume| C2[Codex]
+    end
+    J1 <-->|WireGuard tunnel| H
+    J2 <-->|WireGuard tunnel| H
 ```
 
-Replies are ordinary lines by convention, not protocol: `STARTED t1`,
-`DONE t1 two issues found`. If a `DONE` never comes, resend. That's the whole
-lifecycle.
+- **Transport**: [tailcat](https://github.com/tailscale/tailcat) —
+  Tailscale's data plane without its control plane. WireGuard-encrypted
+  tunnels, NAT hole-punching, DERP relay fallback. Compiled in; no
+  external processes.
+- **Topology**: a star. The host relays every line to every rider and is
+  itself a participant.
+- **Protocol**: newline-delimited text. `[sender] text` for messages,
+  `* …` for join/leave notices (shown to humans, never delivered to
+  agents). Task lifecycle — `TASK <id>`, `STARTED <id>`, `DONE <id>` — is
+  convention, not code.
+- **Identity**: names are chosen by operators and arbitrated by the hub —
+  a new join under an existing name supersedes the stale connection, so
+  leftover wiring can never duplicate work. One-shot `send` connections
+  never displace a rider and receive nothing.
 
-## Agent skills
+## Commands
 
-- **Claude Code**: [`skills/claude/agentbus/SKILL.md`](skills/claude/agentbus/SKILL.md) —
-  symlink into `~/.claude/skills/agentbus/`. Teaches the join + Monitor
-  re-arm loop.
-- **Codex**: [`skills/codex/AGENTS.md`](skills/codex/AGENTS.md) — the
-  `codex queue` wiring and an AGENTS.md snippet.
+| Command | What it does |
+|---|---|
+| `agentbus host` | start a bus, print its ticket |
+| `agentbus join <ticket>` | ride the bus (stays connected) |
+| `agentbus send <ticket> <msg>` | send one message and exit |
+| `agentbus wire claude\|codex <ticket>` | one-command wake wiring for an agent runtime |
+| `agentbus await` | block until unread messages exist, print them, remember the position |
+| `agentbus invite <ticket>` | print the copy-paste boarding pass |
+
+All take `--name`; receivers take `--inbox <file>` and/or
+`--on-msg <cmd>` (message arrives in `$AGENTBUS_MSG`, `$AGENTBUS_FROM`,
+`$AGENTBUS_TEXT` — environment variables, never shell-interpolated, so
+message content cannot inject).
+
+## Security model
+
+> [!WARNING]
+> **The ticket is the key.** Anyone holding it is on the bus and can send
+> tasks to every wired rider. Treat tickets like passwords; rotate by
+> restarting the host.
+
+> [!IMPORTANT]
+> A wired rider executes shell commands autonomously — that is the
+> product. Its briefing scopes tasks to what its operator would approve,
+> and runtime sandboxes/permission systems still apply, but you should
+> wire riders only on machines where that trade is acceptable.
+
+- All traffic is end-to-end WireGuard-encrypted; same-host tests verify
+  the tunnel is genuinely used (both endpoints hold DERP relay
+  connections).
+- Remote message content reaches `--on-msg` commands only via environment
+  variables — no shell injection surface.
+- The installer is delivered as *download → review → run*, never blind
+  `curl | sh`.
 
 ## Honest limits
 
-- **Star topology.** The host relays everything. Host dies → bus is gone;
-  restart it, riders rejoin with the new ticket.
-- **No offline delivery.** Not connected = message lost. Humans notice the
-  missing `DONE`.
-- **The ticket is the key.** Anyone holding it is on the bus. Treat it like a
-  password; rotate by restarting the host.
-- **Pinned dependency.** tailcat makes no stability promises, so agentbus pins
-  it and upgrades deliberately.
+- **Star topology.** Host dies → bus gone. Riders rejoin a new ticket.
+- **No offline delivery yet.** Disconnected riders miss messages; a
+  missing `DONE` means resend. (A host-side spool with catch-up on rejoin
+  is the next milestone.)
+- **Same-host ≠ WAN proof.** The tunnel is real either way, but if you
+  need cross-network guarantees, test across your actual networks.
+- **Pinned dependency.** tailcat makes no API stability promises; agentbus
+  pins it and upgrades deliberately.
 
-These are features at this stage: no queues to reconcile, no ledgers to
-debug, no state to clean up. `kill` leaves nothing behind.
+What you don't get is also what you don't pay for: no queues to
+reconcile, no ledgers to debug, no state to clean up. `kill` leaves
+nothing behind.
 
-## Build
+## Install
+
+Grab a release binary (linux/macOS, amd64/arm64), or:
 
 ```console
 $ go build -o agentbus ./cmd/agentbus
 ```
 
-Pure Go, static binary, cross-compiles: `GOOS=linux GOARCH=arm64 go build ...`
+Pure Go, static binary, cross-compiles with plain `GOOS`/`GOARCH`.
+`AGENTBUS_DEBUG=1` enables tunnel debug logs.
 
-Set `AGENTBUS_DEBUG=1` for tunnel debug logs.
+## For agents
+
+- **Claude Code skill**: [`skills/claude/agentbus/SKILL.md`](skills/claude/agentbus/SKILL.md) — symlink into `~/.claude/skills/agentbus/`
+- **Codex wiring**: [`skills/codex/AGENTS.md`](skills/codex/AGENTS.md)
+- **The long-form boarding guide**: [`BOARDING.md`](BOARDING.md)
+
+<details>
+<summary><b>FAQ</b></summary>
+
+**Why not just Tailscale / a tailnet?**
+Because your colleague's agent shouldn't need to join your network to
+receive a task. A ticket is a paste; a tailnet is an enrollment.
+
+**Why a hub instead of a mesh?**
+Because a star you can reason about beats a mesh you can't. One relay,
+one place to look, honest presence (riders visibly hop on and off).
+
+**What happens when two riders pick the same name?**
+Last join wins: the hub closes the stale connection and announces a
+reconnect. Names are identity; duplicates can't double-deliver.
+
+**Can a message wake an agent that isn't running?**
+Yes — that's the default. `wire` sets up a detached join whose only job
+is to spawn a resumed runtime turn per message. Nothing needs to be
+running between messages.
+
+**Why lines instead of JSON?**
+Because every failure so far in this problem space came from machinery,
+not from missing structure. Lines are debuggable with `cat`.
+
+</details>
+
+---
+
+<div align="center">
+<sub>Built on <a href="https://github.com/tailscale/tailcat">tailcat</a>.
+WireGuard is a registered trademark of Jason A. Donenfeld.</sub>
+</div>
