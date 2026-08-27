@@ -1,2 +1,5 @@
 /agentbus
 /dist/
+*.log
+.env
+.env.*

@@ -1,0 +1,29 @@
+# Secret scanning config for agentbus.
+# Extends the gitleaks default ruleset with agentbus-specific rules.
+# Enforced by .githooks/pre-commit locally and by CI on every push.
+
+[extend]
+useDefault = true
+
+# A live bus ticket is a credential: whoever holds it is on the bus and
+# can send tasks to every wired rider. Tickets must never be committed.
+# Real tickets are "tc" + 100+ base64url chars; docs use short elided
+# examples ("tcomFw...") which stay under this threshold on purpose.
+[[rules]]
+id = "agentbus-ticket"
+description = "agentbus bus ticket (live admission credential)"
+regex = '''\btc[A-Za-z0-9_-]{60,}\b'''
+keywords = ["tc"]
+
+[allowlist]
+description = "Non-secret paths and known-dead examples"
+paths = [
+  '''go\.sum$''',
+]
+# The v0.1 README (commit 4a0dd570) embedded a real ticket as its example.
+# Verified dead: hosts mint a fresh ephemeral key per run and that host is
+# gone, so the ticket admits nobody. Allowlisted by exact prefix so the
+# full-history CI scan passes; any OTHER ticket is still caught.
+regexes = [
+  '''tcomFwWCBjmSSW04e2SZjWcjOrFTame5[A-Za-z0-9_-]*''',
+]
