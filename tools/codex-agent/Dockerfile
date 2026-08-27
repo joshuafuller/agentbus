@@ -22,7 +22,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Pin the codex CLI to the version proven on the host.
 RUN npm install -g @openai/codex@0.149.1
 
-RUN curl -fsSL "https://go.dev/dl/go1.26.5.linux-${TARGETARCH}.tar.gz" -o /tmp/go.tar.gz \
+RUN case "${TARGETARCH}" in \
+         amd64) GO_SHA256="5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053" ;; \
+         arm64) GO_SHA256="fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49" ;; \
+         *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://go.dev/dl/go1.26.5.linux-${TARGETARCH}.tar.gz" -o /tmp/go.tar.gz \
+    && echo "${GO_SHA256}  /tmp/go.tar.gz" | sha256sum -c - \
     && rm -rf /usr/local/go \
     && tar -C /usr/local -xzf /tmp/go.tar.gz \
     && rm /tmp/go.tar.gz
