@@ -338,8 +338,9 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 	// Heartbeat: silence must mean something is wrong, not that the
 	// rider is idle — every join pings so the hub's liveness monitor
 	// can flag genuinely unresponsive participants (issue #8).
+	interval := heartbeatEvery
 	go func() {
-		t := time.NewTicker(heartbeatEvery)
+		t := time.NewTicker(interval)
 		defer t.Stop()
 		for range t.C {
 			sendLine(bus.Ping())
