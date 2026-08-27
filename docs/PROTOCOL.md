@@ -101,19 +101,31 @@ the terminal and the inbox file, in place of the raw JSON.
 
 ### Offline delivery (host spool)
 
-An addressed line whose target name holds no live connection is spooled
-durably on the host (`~/.agentbus/spool/<name>/`, one 0600 file per
-line, 24h TTL) and flushed oldest-first when that name next joins,
-before live traffic. The hub announces it on the feed — `* <name> is
-away — line spooled (<n> pending)` — so a spool is never silent; with
-no spool configured the hub says the line was dropped instead. Only
-addressed lines spool: broadcast is the observability feed and is
-ephemeral by design (ADR 0003). Because task snapshots are addressed
-lines, this works both ways — a driver can task an offline rider and
-log off; the rider catches up on join, and the results wait in the
-driver's own spool. Not yet provided (next: per-envelope ACK + dedup):
-delivery is at-most-once on flush — a connection lost mid-flush can
-drop lines.
+EVERY addressed line lands durably in the host spool first
+(`~/.agentbus/spool/<name>/`, one 0600 file per line, 24h TTL). The
+target's delivery pump then offers entries oldest-first as
+**envelopes**:
+
+```
+hub → receiver:   [<sender>] E:<id> <payload>
+receiver → hub:   ACKD <id>
+```
+
+The spool forgets an entry only when the receiver's `ACKD` arrives;
+until then the pump redelivers it (after the retry interval, or on
+rejoin), so delivery is **at-least-once** and receivers drop duplicate
+ids they have already processed (re-ACKing them). A rider ACKs a task
+envelope only after the SUBMITTED snapshot is persisted — durable
+acceptance, never "parsed" or "buffered in memory". When the target
+holds no connection the hub announces `* <name> is away — line spooled
+(<n> pending)`; with no spool configured the hub says the line was
+dropped instead. Only addressed lines spool: broadcast is the
+observability feed and is ephemeral by design (ADR 0003). Because task
+snapshots are addressed lines, this works both ways — a driver can
+task an offline rider and log off; the rider catches up on join, and
+the results wait, redelivered until ACKed, in the driver's own spool.
+Ordering is oldest-first per name in the common case; a redelivered
+envelope can arrive after newer ones (dedup makes this harmless).
 
 ### Notice (hub → clients)
 

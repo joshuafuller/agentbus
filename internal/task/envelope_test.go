@@ -1,6 +1,7 @@
 package task
 
 import (
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -252,6 +253,61 @@ func TestRejectDoesNotBlockTheCaller(t *testing.T) {
 	if d := time.Since(start); d > 100*time.Millisecond {
 		t.Fatalf("overflow Handle blocked the read loop for %v", d)
 	}
+}
+
+// The rider's ACK means DURABLE acceptance (issue #7): it must fire
+// only after the SUBMITTED snapshot is on disk — never on enqueue,
+// which an unlucky crash would erase.
+func TestRiderAcksOnlyAfterSubmittedPersisted(t *testing.T) {
+	dir := t.TempDir()
+	acked := make(chan string, 1)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	terminal := make(chan struct{}, 1)
+	r := &Rider{
+		Dir: dir,
+		Runner: func(string) (string, error) {
+			close(started)
+			<-release
+			return "ok", nil
+		},
+		Send: func(line string) {
+			if _, payload, ok := bus.ParseAddressed(line); ok {
+				if tk, ok := DecodeTask(payload); ok && tk.Status.State.Terminal() {
+					terminal <- struct{}{}
+				}
+			}
+		},
+		Acked: func(id string) { acked <- id },
+	}
+	// The worker keeps writing task files until the terminal snapshot
+	// is out; wait for it or TempDir cleanup races the writes.
+	defer func() {
+		select {
+		case <-terminal:
+		case <-time.After(5 * time.Second):
+		}
+	}()
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("x"))
+	if !r.HandleEnveloped("alice", "env-42", EncodeMessage(msg)) {
+		t.Fatal("HandleEnveloped did not claim the task")
+	}
+
+	select {
+	case id := <-acked:
+		if id != "env-42" {
+			t.Fatalf("acked %q, want env-42", id)
+		}
+		// At ACK time the SUBMITTED task must already be on disk.
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) == 0 {
+			t.Fatalf("acked before any task was persisted (entries=%v err=%v)", entries, err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no ACK for the accepted task")
+	}
+	<-started
+	close(release)
 }
 
 func TestRiderIgnoresChatLines(t *testing.T) {

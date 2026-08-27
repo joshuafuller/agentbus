@@ -288,7 +288,10 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		rider = &task.Rider{Dir: dir, Runner: execRunner(onMsg), Send: sendLine}
+		rider = &task.Rider{Dir: dir, Runner: execRunner(onMsg), Send: sendLine,
+			// ACK a task envelope only once its SUBMITTED snapshot is
+			// on disk — the hub then forgets its spooled copy.
+			Acked: func(id string) { sendLine(bus.Ack(id)) }}
 	}
 
 	go func() {
@@ -301,19 +304,43 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 	}()
 
 	sc := bufio.NewScanner(conn)
+	// At-least-once delivery: the hub redelivers unACKed envelopes, so
+	// remember recent ids and re-ACK duplicates without reprocessing.
+	seen := bus.NewDedup(1024)
 	for sc.Scan() {
 		line := sc.Text()
 		if bus.IsNotice(line) {
 			fmt.Println(line) // visible to humans, never delivered to agents
 			continue
 		}
+		from, body, isMsg := bus.ParseMessage(line)
+		if isMsg {
+			if id, payload, isEnv := bus.ParseEnvelope(body); isEnv {
+				if seen.Seen(id) {
+					sendLine(bus.Ack(id)) // duplicate: re-ACK, don't reprocess
+					continue
+				}
+				plain := bus.Message(from, payload)
+				if rider != nil {
+					if _, isTask := task.DecodeMessage(payload); isTask {
+						// Enqueue and return; the ACK follows from the
+						// rider once the SUBMITTED snapshot persists.
+						rider.HandleEnveloped(from, id, payload)
+						continue
+					}
+					sink.Deliver(plain)
+					sendLine(bus.Ack(id)) // durable: inbox append is synchronous
+					continue
+				}
+				sink.Deliver(driverLine(plain))
+				sendLine(bus.Ack(id))
+				continue
+			}
+		}
 		if rider != nil {
-			if from, payload, ok := bus.ParseMessage(line); ok {
-				if _, isTask := task.DecodeMessage(payload); isTask {
-					// Handle enqueues and returns; the rider's worker runs
-					// tasks strictly one at a time so concurrent turns never
-					// race the persisted model conversation.
-					rider.Handle(from, payload)
+			if isMsg {
+				if _, isTask := task.DecodeMessage(body); isTask {
+					rider.Handle(from, body)
 					continue
 				}
 			}

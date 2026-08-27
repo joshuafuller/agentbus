@@ -15,6 +15,8 @@ import (
 
 // startRider joins hub as a wired rider whose runner echoes the prompt.
 // runner == nil means a deaf rider: joined, welcomed, never executing.
+// Enveloped deliveries (spool-enabled hubs) are ACKed and deduped the
+// way the real join loop does it.
 func startRider(t *testing.T, h *bus.Hub, name string, runner func(string) (string, error)) {
 	t.Helper()
 	client, server := net.Pipe()
@@ -24,14 +26,16 @@ func startRider(t *testing.T, h *bus.Hub, name string, runner func(string) (stri
 		t.Fatal(err)
 	}
 	var mu sync.Mutex
+	sendLine := func(line string) {
+		mu.Lock()
+		defer mu.Unlock()
+		client.Write([]byte(line + "\n"))
+	}
 	r := &task.Rider{
 		Dir:    t.TempDir(),
 		Runner: runner,
-		Send: func(line string) {
-			mu.Lock()
-			defer mu.Unlock()
-			client.Write([]byte(line + "\n"))
-		},
+		Send:   sendLine,
+		Acked:  func(id string) { sendLine(bus.Ack(id)) },
 	}
 	sc := bufio.NewScanner(client)
 	// Consume the welcome before returning: only then is the rider
@@ -42,12 +46,21 @@ func startRider(t *testing.T, h *bus.Hub, name string, runner func(string) (stri
 		t.Fatalf("no welcome for rider %s: %q", name, sc.Text())
 	}
 	go func() {
+		seen := bus.NewDedup(256)
 		for sc.Scan() {
-			from, payload, ok := bus.ParseMessage(sc.Text())
+			from, body, ok := bus.ParseMessage(sc.Text())
 			if !ok || runner == nil {
 				continue // notices, or a deaf rider
 			}
-			r.Handle(from, payload)
+			if id, payload, isEnv := bus.ParseEnvelope(body); isEnv {
+				if seen.Seen(id) {
+					sendLine(bus.Ack(id))
+					continue
+				}
+				r.HandleEnveloped(from, id, payload)
+				continue
+			}
+			r.Handle(from, body)
 		}
 	}()
 }
@@ -222,6 +235,38 @@ func TestTaskReportsStreamEndNotTimeout(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "stream ended") && !strings.Contains(out.String(), "connection") {
 		t.Fatalf("output hides the stream loss behind timeout wording: %q", out.String())
+	}
+}
+
+// The whole ACK loop, end to end over a spool-enabled hub exactly as
+// production runs it: enveloped deliveries both directions, both sides
+// ACKing, and both spools empty when the dust settles.
+func TestTaskRoundTripOverSpooledHub(t *testing.T) {
+	h := bus.NewHub("host", nil)
+	h.Spool = bus.NewFileSpool(t.TempDir(), time.Hour)
+	h.RetryInterval = 300 * time.Millisecond
+	startRider(t, h, "worker", func(prompt string) (string, error) {
+		return "echo: " + prompt, nil
+	})
+
+	var out strings.Builder
+	code := runTaskConn(requesterConn(t, h), "alice", "worker", "ping", 10*time.Second, &out)
+	if code != 0 {
+		t.Fatalf("exit code %d, want 0; output:\n%s", code, out.String())
+	}
+	for _, want := range []string{"submitted", "working", "completed", "echo: ping"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output missing %q:\n%s", want, out.String())
+		}
+	}
+	// Every envelope in both directions was ACKed: nothing pending.
+	deadline := time.Now().Add(5 * time.Second)
+	for h.Spool.Pending("worker")+h.Spool.Pending("alice") != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("unacked leftovers: worker=%d alice=%d",
+				h.Spool.Pending("worker"), h.Spool.Pending("alice"))
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

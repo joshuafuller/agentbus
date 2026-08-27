@@ -81,6 +81,40 @@ func TestParseAddressedRejectsPlainLines(t *testing.T) {
 	}
 }
 
+func TestEnvelopeRoundTrip(t *testing.T) {
+	payload := `A2A-MSG {"messageId":"m1"}`
+	body := Envelope("1787-000042", payload)
+	id, got, ok := ParseEnvelope(body)
+	if !ok {
+		t.Fatalf("ParseEnvelope rejected %q", body)
+	}
+	if id != "1787-000042" || got != payload {
+		t.Fatalf("got id=%q payload=%q", id, got)
+	}
+}
+
+func TestParseEnvelopePassesPlainTextThrough(t *testing.T) {
+	for _, s := range []string{"hi there", "E:", "E:noSpace", ""} {
+		if _, _, ok := ParseEnvelope(s); ok {
+			t.Fatalf("ParseEnvelope accepted %q", s)
+		}
+	}
+}
+
+func TestAckRoundTrip(t *testing.T) {
+	line := Ack("1787-000042")
+	id, ok := ParseAck(line)
+	if !ok || id != "1787-000042" {
+		t.Fatalf("ParseAck(%q) = %q, %v", line, id, ok)
+	}
+	if _, ok := ParseAck("ACKD"); ok {
+		t.Fatal("ParseAck accepted a bare ACKD")
+	}
+	if _, ok := ParseAck("[a] hi"); ok {
+		t.Fatal("ParseAck accepted a message line")
+	}
+}
+
 func TestNotice(t *testing.T) {
 	if !IsNotice(Notice("codex-1 hopped on the bus")) {
 		t.Fatal("Notice output not recognized by IsNotice")

@@ -62,10 +62,34 @@ func runTaskConn(conn net.Conn, name, rider, prompt string, timeout time.Duratio
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(prompt))
 	fmt.Fprintf(conn, "%s\n", bus.Addressed(rider, task.EncodeMessage(msg)))
 
+	// The hub delivers addressed lines as envelopes: ACK each (from
+	// this goroutine — the only writer once the request is sent), drop
+	// duplicates, and hand Watch the plain line it expects.
+	pr, pw := io.Pipe()
+	go func() {
+		defer pw.Close()
+		seen := bus.NewDedup(256)
+		sc := bufio.NewScanner(br)
+		sc.Buffer(make([]byte, 0, 64*1024), 256*1024)
+		for sc.Scan() {
+			line := sc.Text()
+			if from, body, ok := bus.ParseMessage(line); ok {
+				if id, payload, isEnv := bus.ParseEnvelope(body); isEnv {
+					fmt.Fprintf(conn, "%s\n", bus.Ack(id))
+					if seen.Seen(id) {
+						continue
+					}
+					line = bus.Message(from, payload)
+				}
+			}
+			fmt.Fprintln(pw, line)
+		}
+	}()
+
 	// Snapshots are correlated by our message ID in the task history —
 	// the task ID itself is minted by the rider (server-generated per
 	// spec) and unknown here until the first snapshot arrives.
-	final, err := task.Watch(br, msg.ID, func(snap *a2a.Task) {
+	final, err := task.Watch(pr, msg.ID, func(snap *a2a.Task) {
 		fmt.Fprintf(out, "%s  %s\n", renderState(snap.Status.State), snap.ID)
 	})
 

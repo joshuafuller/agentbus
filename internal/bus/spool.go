@@ -19,6 +19,10 @@ import (
 // nothing (PR #15 review, P1).
 type Spooler interface {
 	Add(rider, line string) error
+	// Offer feeds entries oldest-first without removing them; Remove is
+	// the ACK. See FileSpool.Offer / FileSpool.Remove.
+	Offer(rider string, accept func(id, line string) bool) error
+	Remove(rider, id string) error
 	Drain(rider string, accept func(line string) bool) (delivered, remaining int, err error)
 	Pending(rider string) int
 }
@@ -133,6 +137,52 @@ func (s *FileSpool) Drain(rider string, accept func(line string) bool) (delivere
 		}
 	}
 	return delivered, 0, nil
+}
+
+// Offer feeds unexpired spooled entries to accept, oldest first,
+// WITHOUT removing anything: an entry leaves the spool only via
+// Remove, once the receiver has acknowledged it — delivery to a
+// connection is an attempt, not delivery (issue #7, ADR 0004). The id
+// handed to accept is stable across Offers and is the token the ACK
+// carries. The first refusal ends the pass.
+func (s *FileSpool) Offer(rider string, accept func(id, line string) bool) error {
+	rdir, err := s.riderDir(rider)
+	if err != nil {
+		return err
+	}
+	names, err := spoolEntries(rdir)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		path := filepath.Join(rdir, name)
+		if s.expired(name) {
+			os.Remove(path)
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		id := strings.TrimSuffix(name, ".line")
+		if !accept(id, string(data)) {
+			return nil
+		}
+	}
+	return nil
+}
+
+// Remove deletes one acknowledged entry by the id Offer handed out.
+func (s *FileSpool) Remove(rider, id string) error {
+	rdir, err := s.riderDir(rider)
+	if err != nil {
+		return err
+	}
+	name := id + ".line"
+	if filepath.Base(name) != name || id == "" {
+		return fmt.Errorf("invalid spool entry id %q", id)
+	}
+	return os.Remove(filepath.Join(rdir, name))
 }
 
 // Pending reports how many lines wait for a rider (expired included —

@@ -78,6 +78,12 @@ type Rider struct {
 	Runner func(prompt string) (string, error) // the wake path (--on-msg)
 	Send   func(line string)                   // writes one line to the bus
 
+	// Acked, if non-nil, is called with a task's envelope id once the
+	// SUBMITTED snapshot is durably on disk — the moment the hub may
+	// forget its spooled copy (issue #7: ACK means durable acceptance,
+	// never "enqueued in memory").
+	Acked func(envelopeID string)
+
 	once    sync.Once
 	queue   chan queuedTask
 	rejects chan rejection
@@ -90,8 +96,9 @@ type rejection struct {
 }
 
 type queuedTask struct {
-	from string
-	msg  *a2a.Message
+	from  string
+	envID string
+	msg   *a2a.Message
 }
 
 // Handle inspects one received payload. It returns true when the
@@ -103,6 +110,13 @@ type queuedTask struct {
 // single persisted model conversation, and concurrent turns against
 // it race (PR #11 review).
 func (r *Rider) Handle(from, payload string) bool {
+	return r.HandleEnveloped(from, "", payload)
+}
+
+// HandleEnveloped is Handle for enveloped deliveries: envID is the
+// hub's spool entry id, ACKed (via Acked) only after the SUBMITTED
+// snapshot persists.
+func (r *Rider) HandleEnveloped(from, envID, payload string) bool {
 	msg, ok := DecodeMessage(payload)
 	if !ok {
 		return false
@@ -112,7 +126,7 @@ func (r *Rider) Handle(from, payload string) bool {
 		r.rejects = make(chan rejection, taskQueueDepth)
 		go func() {
 			for q := range r.queue {
-				r.run(q.from, q.msg)
+				r.run(q.from, q.envID, q.msg)
 			}
 		}()
 		// Rejections get their own worker: reject writes to disk and
@@ -126,7 +140,7 @@ func (r *Rider) Handle(from, payload string) bool {
 		}()
 	})
 	select {
-	case r.queue <- queuedTask{from: from, msg: msg}:
+	case r.queue <- queuedTask{from: from, envID: envID, msg: msg}:
 	default:
 		// Queue full: refuse VISIBLY — the requester gets a terminal
 		// REJECTED snapshot instead of waiting out its timeout
@@ -165,9 +179,17 @@ func (r *Rider) reject(from string, msg *a2a.Message, cause string) {
 	r.Send(bus.Addressed(from, EncodeTask(tk)))
 }
 
-func (r *Rider) run(from string, msg *a2a.Message) {
+func (r *Rider) run(from, envID string, msg *a2a.Message) {
 	tk := a2a.NewSubmittedTask(msg, msg)
+	acked := false
 	notify := func(snap *a2a.Task) {
+		// The first notify fires after the SUBMITTED snapshot's Save:
+		// the task is durable, so the envelope may be acknowledged and
+		// the hub may forget its spooled copy.
+		if !acked && envID != "" && r.Acked != nil {
+			r.Acked(envID)
+		}
+		acked = true
 		r.Send(bus.Addressed(from, EncodeTask(snap)))
 	}
 	// A Run error means the task could not be advanced (persistence
