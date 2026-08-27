@@ -10,20 +10,22 @@ This document is the whole-project threat model, not only secret handling.
 
 ## Trust boundaries
 
-```
-operator ──(chooses names, flags,      ┌─────────────┐
-             wires riders)────────────▶│  local CLI  │
-                                       └──────┬──────┘
-ticket holder ──(any bus message)──▶ WireGuard tunnel (tailcat)
-                                              │
-                                       ┌──────▼──────┐
-                                       │     hub     │ relays every line
-                                       └──────┬──────┘
-                                              │  [sender] text
-                                       ┌──────▼──────┐
-                                       │  --on-msg   │ spawns an agent turn
-                                       │  / --inbox  │ (shell access)
-                                       └─────────────┘
+```mermaid
+flowchart TB
+    OP(["operator<br/>(trusted)"]) -->|chooses names, flags, wires riders| CLI["local CLI"]
+    TH(["ticket holder<br/>(UNTRUSTED)"]) -->|any bus message| TUN
+
+    subgraph boundary["trust boundary: the tunnel"]
+        TUN["WireGuard tunnel (tailcat)"] --> HUB["hub<br/>relays every line"]
+    end
+
+    CLI --> HUB
+    HUB -->|"[sender] text"| DEL["--on-msg / --inbox<br/>spawns an agent turn (shell access)"]
+
+    classDef untrusted fill:#7f1d1d,stroke:#ef4444,color:#fff;
+    classDef danger fill:#7c2d12,stroke:#f97316,color:#fff;
+    class TH untrusted;
+    class DEL danger;
 ```
 
 Two parties are outside your control:
