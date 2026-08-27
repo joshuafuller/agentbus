@@ -212,6 +212,114 @@ func TestTaskNoticeHookIgnoresPlainAddressedLines(t *testing.T) {
 	}
 }
 
+// The Gate 3 contract: an addressed line to a rider that is not
+// connected is durably spooled — with a visible notice, never a silent
+// drop — and flushed in order when that name joins.
+func TestAddressedLineToAbsentRiderIsSpooled(t *testing.T) {
+	h := NewHub("host", nil)
+	h.Spool = NewFileSpool(t.TempDir(), time.Hour)
+	a, _ := testPeer(t, h, "alice")
+	_, bLines := testPeer(t, h, "bob")
+
+	if _, err := a.Write([]byte(Addressed("away-rider", "A2A-MSG later-task") + "\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The bus says so instead of staying silent.
+	l := recvLine(t, bLines)
+	if !IsNotice(l) || !strings.Contains(l, "away-rider") || !strings.Contains(l, "spooled") {
+		t.Fatalf("bob got %q, want a spooled-for-away-rider notice", l)
+	}
+
+	// The rider joins and receives the spooled line before anything else.
+	_, rLines := testPeer(t, h, "away-rider")
+	if got := recvMessage(t, rLines); got != Message("alice", "A2A-MSG later-task") {
+		t.Fatalf("rejoined rider got %q, want the spooled line", got)
+	}
+}
+
+func TestSpoolFlushPreservesOrderAcrossSenders(t *testing.T) {
+	h := NewHub("host", nil)
+	h.Spool = NewFileSpool(t.TempDir(), time.Hour)
+	a, _ := testPeer(t, h, "alice")
+	b, _ := testPeer(t, h, "bob")
+
+	if _, err := a.Write([]byte(Addressed("away-rider", "first") + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	// Wait until the first line is durably spooled before sending the
+	// second from another conn — otherwise their order is a data race.
+	waitPending(t, h.Spool, "away-rider", 1)
+	if _, err := b.Write([]byte(Addressed("away-rider", "second") + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	waitPending(t, h.Spool, "away-rider", 2)
+
+	_, rLines := testPeer(t, h, "away-rider")
+	if got := recvMessage(t, rLines); got != Message("alice", "first") {
+		t.Fatalf("got %q, want alice's line first", got)
+	}
+	if got := recvMessage(t, rLines); got != Message("bob", "second") {
+		t.Fatalf("got %q, want bob's line second", got)
+	}
+}
+
+func TestNoSpoolMeansNoticeStillNamesTheLoss(t *testing.T) {
+	// Without a spool configured the line is lost — the bus must still
+	// say so rather than pretend delivery happened.
+	h := NewHub("host", nil)
+	a, _ := testPeer(t, h, "alice")
+	_, bLines := testPeer(t, h, "bob")
+
+	if _, err := a.Write([]byte(Addressed("ghost", "hello?") + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	l := recvLine(t, bLines)
+	if !IsNotice(l) || !strings.Contains(l, "ghost") {
+		t.Fatalf("bob got %q, want a nobody-holds-that-name notice", l)
+	}
+}
+
+// Broadcast (non-addressed) lines are the observability feed and are
+// never spooled: ADR 0003 makes addressed delivery the reliable path.
+func TestBroadcastLinesAreNotSpooled(t *testing.T) {
+	spool := NewFileSpool(t.TempDir(), time.Hour)
+	h := NewHub("host", nil)
+	h.Spool = spool
+	a, _ := testPeer(t, h, "alice")
+	_, witnessLines := testPeer(t, h, "witness")
+
+	if _, err := a.Write([]byte("hello everyone\n")); err != nil {
+		t.Fatal(err)
+	}
+	// The witness receiving the line proves delivery ran; the relay loop
+	// holds the hub lock, so a join after this observably orders after
+	// the broadcast — without this the late rider can legitimately
+	// register first and receive it.
+	if l := recvMessage(t, witnessLines); l != Message("alice", "hello everyone") {
+		t.Fatalf("witness got %q", l)
+	}
+	_, rLines := testPeer(t, h, "late-rider")
+	select {
+	case l := <-rLines:
+		if !IsNotice(l) {
+			t.Fatalf("late rider received %q, want nothing but notices", l)
+		}
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func waitPending(t *testing.T, s Spooler, rider string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for s.Pending(rider) < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("spool never reached %d pending for %s", n, rider)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestOneshotSenderNotEchoedToSameName(t *testing.T) {
 	h := NewHub("host", nil)
 	// Persistent rider and a one-shot sender share the name "codex".

@@ -20,6 +20,12 @@ type Hub struct {
 	// visible to the human at the host but never wake an agent.
 	OnNotice func(line string)
 
+	// Spool, if non-nil, durably stores addressed lines whose target
+	// holds no live connection, for delivery when that name joins
+	// (Gate 3, issue #7). Without a spool such lines are lost — either
+	// way the hub says so on the feed rather than staying silent.
+	Spool Spooler
+
 	// TaskNotice, if non-nil, inspects each addressed payload the hub
 	// relays and may return a feed notice describing it — how task
 	// lifecycle transitions become visible to every driver (issue #12)
@@ -88,6 +94,13 @@ func (h *Hub) Serve(conn net.Conn) {
 			n++
 		}
 	}
+	// The welcome confirms registration: once a joiner reads it, the
+	// hub is guaranteed to relay to it. Written under the same lock
+	// that serializes every other write to this conn, so the welcome is
+	// always the FIRST line a client reads — another peer's concurrent
+	// join notice cannot interleave ahead of it. Clients (send, task)
+	// rely on first-line-is-welcome.
+	writeLine(conn, Notice(fmt.Sprintf("welcome aboard, %s — %d on the bus", name, n)))
 	h.mu.Unlock()
 	if stale != nil {
 		// Tell the displaced connection why it is going away. Without
@@ -101,9 +114,6 @@ func (h *Hub) Serve(conn net.Conn) {
 			"displaced — another connection joined as %s and took this name", name)))
 		stale.Close()
 	}
-	// The welcome confirms registration: once a joiner reads it, the
-	// hub is guaranteed to relay to it.
-	fmt.Fprintf(conn, "%s\n", Notice(fmt.Sprintf("welcome aboard, %s — %d on the bus", name, n)))
 	if !oneshot {
 		if stale != nil {
 			// Say what happened, not what it usually means. "reconnected"
@@ -117,6 +127,18 @@ func (h *Hub) Serve(conn net.Conn) {
 				"%s joined, displacing an existing connection under that name", name), conn)
 		} else {
 			h.notice(fmt.Sprintf("%s hopped on the bus", name), conn)
+		}
+	}
+
+	// Catch-up before live traffic: lines spooled while this name was
+	// away flush now, oldest first, on this connection only.
+	if !oneshot && h.Spool != nil {
+		lines, err := h.Spool.Drain(name)
+		if err != nil {
+			h.notice(fmt.Sprintf("spool drain for %s failed: %v", name, err), nil)
+		}
+		for _, l := range lines {
+			writeLine(conn, l)
 		}
 	}
 
@@ -163,16 +185,36 @@ func (h *Hub) Peers() []string {
 func (h *Hub) deliver(from, text string, via net.Conn) {
 	if to, payload, ok := ParseAddressed(text); ok {
 		line := Message(from, payload)
+		delivered := 0
 		h.mu.Lock()
 		for conn, p := range h.peers {
 			if p.oneshot || p.name != to || conn == via {
 				continue
 			}
 			writeLine(conn, line)
+			delivered++
 		}
 		h.mu.Unlock()
-		if h.sink != nil && to == h.name && from != h.name {
-			h.sink(line)
+		if to == h.name {
+			// The host is always present; its sink is its delivery.
+			delivered++
+			if h.sink != nil && from != h.name {
+				h.sink(line)
+			}
+		}
+		if delivered == 0 {
+			// Nobody holds that name. Spool for its return, or at least
+			// name the loss — a silent drop is the failure mode this
+			// project exists to kill (issue #8, ADR 0004).
+			if h.Spool != nil {
+				if err := h.Spool.Add(to, line); err != nil {
+					h.notice(fmt.Sprintf("could not spool for %s: %v — line lost", to, err), nil)
+				} else {
+					h.notice(fmt.Sprintf("%s is away — line spooled (%d pending)", to, h.Spool.Pending(to)), nil)
+				}
+			} else {
+				h.notice(fmt.Sprintf("nobody holds the name %s — line dropped (no spool)", to), nil)
+			}
 		}
 		if h.TaskNotice != nil {
 			if n, ok := h.TaskNotice(from, to, payload); ok {

@@ -99,6 +99,22 @@ structurally incapable of waking a rider. On a driver's `join` (no
 readable line — `[<rider>] task <id8> <state> → <result or cause>` — in
 the terminal and the inbox file, in place of the raw JSON.
 
+### Offline delivery (host spool)
+
+An addressed line whose target name holds no live connection is spooled
+durably on the host (`~/.agentbus/spool/<name>/`, one 0600 file per
+line, 24h TTL) and flushed oldest-first when that name next joins,
+before live traffic. The hub announces it on the feed — `* <name> is
+away — line spooled (<n> pending)` — so a spool is never silent; with
+no spool configured the hub says the line was dropped instead. Only
+addressed lines spool: broadcast is the observability feed and is
+ephemeral by design (ADR 0003). Because task snapshots are addressed
+lines, this works both ways — a driver can task an offline rider and
+log off; the rider catches up on join, and the results wait in the
+driver's own spool. Not yet provided (next: per-envelope ACK + dedup):
+delivery is at-most-once on flush — a connection lost mid-flush can
+drop lines.
+
 ### Notice (hub → clients)
 
 ```
