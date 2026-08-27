@@ -66,6 +66,10 @@ func runTaskConn(conn net.Conn, name, rider, prompt string, timeout time.Duratio
 	// this goroutine — the only writer once the request is sent), drop
 	// duplicates, and hand Watch the plain line it expects.
 	pr, pw := io.Pipe()
+	// Closing the read end on return unblocks a writer goroutine caught
+	// mid-write after Watch finished early — otherwise it leaks, parked
+	// on a pipe nobody reads (PR #18 review).
+	defer pr.Close()
 	go func() {
 		defer pw.Close()
 		seen := bus.NewDedup(256)
@@ -82,7 +86,9 @@ func runTaskConn(conn net.Conn, name, rider, prompt string, timeout time.Duratio
 					line = bus.Message(from, payload)
 				}
 			}
-			fmt.Fprintln(pw, line)
+			if _, err := fmt.Fprintln(pw, line); err != nil {
+				return // reader gone; stop instead of blocking forever
+			}
 		}
 	}()
 

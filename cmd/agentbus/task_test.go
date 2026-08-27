@@ -53,11 +53,15 @@ func startRider(t *testing.T, h *bus.Hub, name string, runner func(string) (stri
 				continue // notices, or a deaf rider
 			}
 			if id, payload, isEnv := bus.ParseEnvelope(body); isEnv {
+				if _, isTask := task.DecodeMessage(payload); isTask {
+					r.HandleEnveloped(from, id, payload) // rider owns task dedup+ack
+					continue
+				}
 				if seen.Seen(id) {
 					sendLine(bus.Ack(id))
 					continue
 				}
-				r.HandleEnveloped(from, id, payload)
+				sendLine(bus.Ack(id))
 				continue
 			}
 			r.Handle(from, body)

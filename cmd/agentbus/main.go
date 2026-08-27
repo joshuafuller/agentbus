@@ -321,18 +321,25 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 		from, body, isMsg := bus.ParseMessage(line)
 		if isMsg {
 			if id, payload, isEnv := bus.ParseEnvelope(body); isEnv {
+				if rider != nil {
+					if _, isTask := task.DecodeMessage(payload); isTask {
+						// Task envelopes bypass the join-level dedup
+						// entirely: the Rider owns task dedup with its
+						// DURABLE accepted-set, and ACKs only after the
+						// SUBMITTED persist. A join-level seen-mark here
+						// would re-ACK a redelivery while the task is
+						// still queued unpersisted — the hub would then
+						// forget its only durable copy (PR #18 review).
+						rider.HandleEnveloped(from, id, payload)
+						continue
+					}
+				}
 				if seen.Seen(id) {
-					sendLine(bus.Ack(id)) // duplicate: re-ACK, don't reprocess
+					sendLine(bus.Ack(id)) // duplicate chat: re-ACK, don't reprocess
 					continue
 				}
 				plain := bus.Message(from, payload)
 				if rider != nil {
-					if _, isTask := task.DecodeMessage(payload); isTask {
-						// Enqueue and return; the ACK follows from the
-						// rider once the SUBMITTED snapshot persists.
-						rider.HandleEnveloped(from, id, payload)
-						continue
-					}
 					if sink.Deliver(plain) {
 						sendLine(bus.Ack(id)) // accepted: inbox append is synchronous
 					}
