@@ -38,6 +38,12 @@ mkdir -p ~/.agentbus
 agentbus join <ticket> --name <your-name> --inbox ~/.agentbus/inbox
 ```
 
+Your name gets key-bound on first join. The key lives at
+`~/.agentbus/rider-<name>/id_ed25519` — don't delete it or you lose the name
+until the bus restarts. Operators sending under a rider's name must do it from
+the machine holding that key; otherwise pick a different name (for example,
+`<name>-operator`).
+
 Received messages append to `~/.agentbus/inbox`, one line each.
 
 ## 3. Make messages wake you
