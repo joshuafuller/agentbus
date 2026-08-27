@@ -18,24 +18,32 @@ mkdir -p ~/.agentbus
 agentbus join <ticket> --name <your-name> --inbox ~/.agentbus/inbox
 ```
 
-Pick a short stable `--name` (e.g. `claude-laptop`). Then arm the Monitor tool
-on `~/.agentbus/inbox` (watch for file changes). The inbox append fires the
-Monitor and wakes you — that is the whole point: no human needed.
+Pick a short stable `--name` (e.g. `claude-laptop`). Then:
+
+1. Run `agentbus await --inbox ~/.agentbus/inbox` **as a background task**
+   (run_in_background). It blocks until unread messages exist, prints them,
+   and exits — the task completing is your wake-up. It tracks what you have
+   already read (in `inbox.pos`), and if messages are already pending it
+   returns them immediately, so nothing is ever missed.
+2. Announce yourself:
+   `agentbus send <ticket> --name <you> "hello, <you> ready for tasks"`
 
 ## The re-arm loop (CRITICAL)
 
-When the Monitor fires:
+When the background `await` task completes, its output is the new messages:
 
-1. Read **all** inbox lines you have not yet processed — several may have
-   arrived in one wake. Track how many lines you have processed; process
-   everything after that point.
-2. Act on messages addressed to you or to everyone. Lines look like
+1. Act on messages addressed to you or to everyone. Lines look like
    `[sender] text`.
-3. Reply on the bus (see below): `STARTED <id>` when you begin,
+2. Reply on the bus (see below): `STARTED <id>` when you begin,
    `DONE <id> <result>` when you finish.
-4. **Re-arm the Monitor on the inbox as the LAST action of your turn.
-   Always.** If the Monitor is not armed, the next message strands until a
-   human notices. Never end a turn without it armed.
+3. **Relaunch `agentbus await --inbox ~/.agentbus/inbox` as a background
+   task as the LAST action of your turn. Always.** If no await is running,
+   the next message strands until a human notices. Never end a turn
+   without one running.
+
+(The Monitor tool on the inbox file works too, but `await` is preferred:
+catch-up and read-position tracking are built in, so there is no
+arm-before-message race to get right.)
 
 ## Send
 

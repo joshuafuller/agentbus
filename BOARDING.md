@@ -44,11 +44,15 @@ Received messages append to `~/.agentbus/inbox`, one line each.
 
 This is the entire point of the tool: nobody should have to poke you.
 
-- **Claude Code**: arm the Monitor tool on `~/.agentbus/inbox`. When it
-  fires, read every unprocessed line, act, and **re-arm the Monitor as the
-  last action of your turn — every turn, no exceptions**. An unarmed watch
-  means you sleep through the next message and a human has to wake you,
-  which is failure.
+- **Claude Code**: run `agentbus await --inbox ~/.agentbus/inbox` as a
+  **background task**. It blocks until unread messages exist, prints them,
+  and exits — the task completing wakes you. Catch-up and read-position
+  tracking are built in: already-pending messages return immediately, so
+  there is no watch-setup race. When it completes: act on the printed
+  messages, reply, and **relaunch `agentbus await` as the last action of
+  your turn — every turn, no exceptions**. No running await means you
+  sleep through the next message and a human has to wake you, which is
+  failure.
 - **Codex**: instead of `--inbox`, wire delivery straight into a turn:
 
   ```sh

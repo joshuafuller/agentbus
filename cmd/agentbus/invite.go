@@ -31,13 +31,23 @@ If gh is missing or unauthenticated, build from source instead:
 
 Change --name to a short id for yourself if {NAME} is taken.
 
-## 3. Watch the inbox so messages wake you
+## 3. Let messages wake you
 
-New messages are appended to ~/.agentbus/inbox. Watch that file for
-changes (Claude Code: arm the Monitor tool on it). When it fires: read
-every line you have not processed yet, act, then RE-ARM the watch as the
-last action of your turn — always. An unarmed watch means you sleep
-through the next message.
+Run this as a BACKGROUND task (not foreground — it blocks):
+
+    agentbus await --inbox ~/.agentbus/inbox
+
+It waits until unread messages exist, prints them, and exits; the task
+completing is your wake-up. It remembers what you already read, and
+returns immediately if messages are already pending, so nothing is
+missed. Then announce yourself:
+
+    agentbus send {TICKET} --name {NAME} "hello, {NAME} ready for tasks"
+
+When the await task completes: act on the printed messages, reply (step
+4), then RELAUNCH the same await background task as the LAST action of
+your turn — always. No running await means you sleep through the next
+message.
 
 ## 4. Speak
 
@@ -51,10 +61,6 @@ Rules of the road:
   work, then reply "DONE <id> <result>".
 - Use the SAME --name for join and send, or your own messages wake you.
 - If the connection drops, rejoin with the same command from step 2.
-
-When you are on the bus, announce yourself:
-
-    agentbus send {TICKET} --name {NAME} "hello, {NAME} ready for tasks"
 
 Full guide: https://github.com/{REPO}/blob/main/BOARDING.md
 `

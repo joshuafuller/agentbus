@@ -34,6 +34,8 @@ Usage:
   agentbus send <ticket> [flags] <msg>  send one message and exit
   agentbus invite <ticket> [flags]      print a copy-paste boarding pass
                                         that onboards a fresh agent
+  agentbus await [--inbox <file>]       block until unread messages exist,
+                                        print them, remember what was read
 
 Flags:
   --name <name>     participant name (default: hostname)
@@ -72,6 +74,9 @@ func main() {
 		ticket, rest := popTicket(args)
 		fs.Parse(rest)
 		err = runSend(ticket, *name, strings.Join(fs.Args(), " "))
+	case "await":
+		fs.Parse(args)
+		err = runAwait(*inbox)
 	case "invite":
 		ticket, rest := popTicket(args)
 		fs.Parse(rest)
@@ -198,6 +203,29 @@ func runJoin(ticket, name string, sink *bus.Sink) error {
 		sink.Deliver(line)
 	}
 	return fmt.Errorf("disconnected from the bus")
+}
+
+// runAwait blocks until the inbox holds unread complete lines, prints
+// them, and exits. An agent runs this as a background task; the task
+// completing is the wake-up. Catch-up is built in: pending lines return
+// immediately, so a message that landed before await started is never
+// lost.
+func runAwait(inbox string) error {
+	if inbox == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		inbox = home + "/.agentbus/inbox"
+	}
+	lines, err := bus.Await(inbox, 200*time.Millisecond)
+	if err != nil {
+		return err
+	}
+	for _, l := range lines {
+		fmt.Println(l)
+	}
+	return nil
 }
 
 func runSend(ticket, name, msg string) error {
