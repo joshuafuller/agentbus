@@ -8,6 +8,8 @@
 # auth and a GH_TOKEN.
 FROM node:22-bookworm-slim
 
+ARG TARGETARCH
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl gcc libc6-dev \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -17,13 +19,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Go toolchain matching go.mod, so agents can actually run the tests
-# they write — an agent that cannot watch a test fail is not doing TDD.
-RUN curl -fsSL https://go.dev/dl/go1.26.5.linux-amd64.tar.gz | tar -C /usr/local -xz
-ENV PATH="/usr/local/go/bin:${PATH}"
-
 # Pin the codex CLI to the version proven on the host.
 RUN npm install -g @openai/codex@0.149.1
+
+RUN curl -fsSL "https://go.dev/dl/go1.26.5.linux-${TARGETARCH}.tar.gz" -o /tmp/go.tar.gz \
+    && rm -rf /usr/local/go \
+    && tar -C /usr/local -xzf /tmp/go.tar.gz \
+    && rm /tmp/go.tar.gz
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 RUN useradd -m agent
 USER agent
