@@ -5,8 +5,13 @@ throwaway Docker container: the container clones the repository over HTTPS,
 checks out a new branch, and runs Codex with the supplied prompt. The prompt
 can have the worker do the work, commit it, push the branch, and open a PR.
 
-The image contains GitHub CLI (`gh`), git, and Codex. Codex is pinned to the
-version used when this image was built.
+The image contains GitHub CLI (`gh`), git, Codex, and the Go 1.26.5 toolchain
+with `gcc` and `libc6-dev`, so workers can build and run tests including
+`-race`. The Go archive is selected for the target architecture and verified
+by checksum. Codex is pinned to the version used when this image was built.
+The image also links `go` and `gofmt` into `/usr/local/bin` for login shells
+that reset `PATH`. A multi-platform build can select `linux/amd64` and
+`linux/arm64` with Docker Buildx; the Dockerfile uses `TARGETARCH` for both.
 
 ## Prerequisites
 
@@ -29,7 +34,7 @@ docker build -t agentbus-codex-agent tools/codex-agent
 ## Usage
 
 ```sh
-tools/codex-agent/run.sh <owner/repo> <branch> <model> <prompt-file> [timeout-seconds]
+tools/codex-agent/run.sh <owner/repo> <branch> <model> <prompt-file> [timeout-seconds] [effort]
 ```
 
 The positional arguments are, in order:
@@ -40,7 +45,8 @@ The positional arguments are, in order:
 | `branch` | required | New branch to create in the cloned repository |
 | `model` | required | Model passed to `codex exec` |
 | `prompt-file` | required | File whose contents are passed as the Codex prompt |
-| `timeout-seconds` | `900` | Maximum time allowed for `codex exec` |
+| `timeout-seconds` | `900` | Maximum time allowed for `codex exec`; `0` means no timeout |
+| `effort` | `high` | `model_reasoning_effort` passed to `codex exec` |
 
 For example:
 
@@ -48,11 +54,17 @@ For example:
 tools/codex-agent/run.sh joshuafuller/agentbus docs/my-change <model> ./prompt.md
 ```
 
-`run.sh` obtains a GitHub token from the host's `gh` login, configures git
-identity from the host (with an agent default if unset), and passes the
-repository, branch, model, and token into the container. It then clones the
-repository, creates the branch, and runs the prompt. The script has no
-`effort` positional argument.
+`run.sh` reads the host's existing token with `gh auth token`; it does not mint
+a token per run. It passes that token as `GH_TOKEN`, along with the repository,
+branch, model, timeout, and reasoning effort, into the container. It then
+clones the repository, creates the branch, and runs the prompt. A timeout of
+`0` skips the timeout wrapper, so the worker runs until the named container is
+stopped externally.
+
+Each container is named `agentbus-agent-<branch>` so it is easy to find and
+stop. The branch portion is sanitized by replacing every character outside
+Docker's `[A-Za-z0-9_.-]` set with `-` (for example, `feature/foo` becomes
+`agentbus-agent-feature-foo`).
 
 ## Security posture
 
