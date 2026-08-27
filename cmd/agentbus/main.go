@@ -181,6 +181,9 @@ func logf() func(string, ...any) {
 func runHost(name string, sink *bus.Sink) error {
 	hub := bus.NewHub(name, sink.Deliver)
 	hub.OnNotice = func(line string) { fmt.Println(line) }
+	// Task lifecycle transitions become feed notices every driver sees
+	// (issue #12). Injected here because bus cannot import task.
+	hub.TaskNotice = task.TransitionNotice
 	srv := &tailcat.Server{
 		Logf: logf(),
 		OnTCP: func(port uint16) func(net.Conn) {
@@ -280,8 +283,12 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 					continue
 				}
 			}
+			sink.Deliver(line)
+			continue
 		}
-		sink.Deliver(line)
+		// A join without a wake command is a driver's seat: task
+		// payloads render as readable lines, not raw JSON (issue #12).
+		sink.Deliver(driverLine(line))
 	}
 	return fmt.Errorf("disconnected from the bus")
 }

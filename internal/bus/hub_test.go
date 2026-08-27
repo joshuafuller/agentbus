@@ -143,6 +143,75 @@ func TestAddressedLineToHostReachesSinkOnly(t *testing.T) {
 	}
 }
 
+// TestTaskNoticeHookBroadcastsTransition: when the hook recognizes an
+// addressed payload as a task transition, every participant gets the
+// notice on the feed — while the payload itself still reaches only its
+// target. Notices ride the notice path, so they can never wake a rider.
+func TestTaskNoticeHookBroadcastsTransition(t *testing.T) {
+	h := NewHub("host", nil)
+	hostNotices := make(chan string, 16)
+	h.OnNotice = func(line string) { hostNotices <- line }
+	h.TaskNotice = func(from, to, payload string) (string, bool) {
+		if payload == "A2A-TASK snap" {
+			return "task 01a0448d: working (" + to + " → " + from + ")", true
+		}
+		return "", false
+	}
+
+	rider, _ := testPeer(t, h, "codex-luna")
+	_, aliceLines := testPeer(t, h, "alice")
+	_, carolLines := testPeer(t, h, "carol")
+
+	if _, err := rider.Write([]byte(Addressed("alice", "A2A-TASK snap") + "\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Carol (uninvolved driver) sees the notice — and only the notice.
+	l := recvLine(t, carolLines)
+	if !IsNotice(l) || !strings.Contains(l, "task 01a0448d: working (alice → codex-luna)") {
+		t.Fatalf("carol got %q, want the transition notice", l)
+	}
+	select {
+	case l := <-carolLines:
+		t.Fatalf("carol also received %q; the payload must stay addressed", l)
+	case <-time.After(100 * time.Millisecond):
+	}
+	// Alice still receives the payload itself.
+	if l := recvMessage(t, aliceLines); l != Message("codex-luna", "A2A-TASK snap") {
+		t.Fatalf("alice got %q, want the snapshot payload", l)
+	}
+	// The host's human view sees it too.
+	for {
+		n := recvLine(t, hostNotices)
+		if strings.Contains(n, "task 01a0448d") {
+			break
+		}
+	}
+}
+
+func TestTaskNoticeHookIgnoresPlainAddressedLines(t *testing.T) {
+	h := NewHub("host", nil)
+	h.TaskNotice = func(from, to, payload string) (string, bool) { return "", false }
+
+	a, _ := testPeer(t, h, "alice")
+	_, bLines := testPeer(t, h, "bob")
+	_, cLines := testPeer(t, h, "carol")
+
+	if _, err := a.Write([]byte(Addressed("bob", "psst just for you") + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if l := recvMessage(t, bLines); l != Message("alice", "psst just for you") {
+		t.Fatalf("bob got %q", l)
+	}
+	select {
+	case l := <-cLines:
+		if !IsNotice(l) || strings.Contains(l, "psst") {
+			t.Fatalf("carol saw %q for a non-task addressed line", l)
+		}
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestOneshotSenderNotEchoedToSameName(t *testing.T) {
 	h := NewHub("host", nil)
 	// Persistent rider and a one-shot sender share the name "codex".

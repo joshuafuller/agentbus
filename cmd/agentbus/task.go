@@ -77,6 +77,22 @@ func runTaskConn(conn net.Conn, name, rider, prompt string, timeout time.Duratio
 	}
 }
 
+// driverLine is the driver's seat (issue #12): a received line whose
+// payload is a task envelope is rewritten as one readable line before
+// it reaches the driver's terminal and inbox; chat lines pass through
+// untouched. Only joins without --on-msg use it — riders keep the raw
+// payloads their task handler consumes.
+func driverLine(line string) string {
+	from, payload, ok := bus.ParseMessage(line)
+	if !ok {
+		return line
+	}
+	if rendered, ok := task.RenderLine(from, payload); ok {
+		return rendered
+	}
+	return line
+}
+
 // execRunner adapts the rider's --on-msg wake command into a task
 // runner: the task prompt reaches the command only via env vars (never
 // interpolated into the shell — the T3 rule), and stdout is captured

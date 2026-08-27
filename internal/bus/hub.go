@@ -20,6 +20,14 @@ type Hub struct {
 	// visible to the human at the host but never wake an agent.
 	OnNotice func(line string)
 
+	// TaskNotice, if non-nil, inspects each addressed payload the hub
+	// relays and may return a feed notice describing it — how task
+	// lifecycle transitions become visible to every driver (issue #12)
+	// without the payload leaving its addressed path. Injected by the
+	// caller because the hub does not know the task wire format; the
+	// notice path guarantees it can never wake a rider.
+	TaskNotice func(from, to, payload string) (string, bool)
+
 	mu    sync.Mutex
 	peers map[net.Conn]peer
 }
@@ -165,6 +173,11 @@ func (h *Hub) deliver(from, text string, via net.Conn) {
 		h.mu.Unlock()
 		if h.sink != nil && to == h.name && from != h.name {
 			h.sink(line)
+		}
+		if h.TaskNotice != nil {
+			if n, ok := h.TaskNotice(from, to, payload); ok {
+				h.notice(n, nil)
+			}
 		}
 		return
 	}
