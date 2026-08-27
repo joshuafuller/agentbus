@@ -95,8 +95,9 @@ func runTaskConn(conn net.Conn, name, rider, prompt string, timeout time.Duratio
 	// review). Stopped on return via hbStop.
 	hbStop := make(chan struct{})
 	defer close(hbStop)
+	interval := heartbeatEvery
 	go func() {
-		t := time.NewTicker(heartbeatEvery)
+		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
 			select {
