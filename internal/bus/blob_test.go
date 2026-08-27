@@ -175,6 +175,35 @@ func TestBlobReceiverReportsTerminalRejection(t *testing.T) {
 	}
 }
 
+func TestBlobReceiverCleansUpPublishFailure(t *testing.T) {
+	dir := t.TempDir()
+	var receipts []string
+	r := NewBlobReceiver(dir, 0, func(string) {})
+	r.Reply = func(_, line string) { receipts = append(receipts, line) }
+	payload := []byte("data")
+	sum := sha256.Sum256(payload)
+	final := filepath.Join(dir, hex.EncodeToString(sum[:])[:8]+"-f.bin")
+	if err := os.Mkdir(final, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	frames := BlobFrames("publish-fail", "f.bin", payload, 4)
+	if consumed, ok := r.Offer("sender", frames[0]); !consumed || !ok {
+		t.Fatal("receiver refused header")
+	}
+	if consumed, ok := r.Offer("sender", frames[1]); !consumed || ok {
+		t.Fatal("publish failure was not refused")
+	}
+	if _, ok := r.open["publish-fail"]; ok {
+		t.Fatal("publish failure left transfer state open")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".partial", "publish-fail")); !os.IsNotExist(err) {
+		t.Fatalf("publish failure left partial file: %v", err)
+	}
+	if len(receipts) != 1 || receipts[0] != "BLOB ERR publish-fail publish-error" {
+		t.Fatalf("publish failure receipt = %v", receipts)
+	}
+}
+
 func TestBlobReceiverRejectsCorruptTransfer(t *testing.T) {
 	dir := t.TempDir()
 	var notes []string

@@ -334,7 +334,11 @@ func (r *BlobReceiver) finish(x *blobXfer) bool {
 	final := filepath.Join(r.dir, got[:8]+"-"+x.hdr.Name)
 	if err := os.Rename(filepath.Join(r.dir, ".partial", x.hdr.ID), final); err != nil {
 		x.refused = true
+		r.rejected[x.hdr.ID] = struct{}{}
+		delete(r.open, x.hdr.ID)
+		os.Remove(filepath.Join(r.dir, ".partial", x.hdr.ID))
 		r.note(fmt.Sprintf("could not publish %s from %s: %v", x.hdr.Name, x.from, err))
+		r.receipt(x, false, "publish-error")
 		return false
 	}
 	delete(r.open, x.hdr.ID)
