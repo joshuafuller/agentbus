@@ -12,9 +12,28 @@ CLI, wire format, and APIs may change without notice.
 - MIT license.
 - Secret scanning: `.gitleaks.toml`, `.githooks/pre-commit`, CI `secrets` job.
 
+### Fixed
+- `wire`: the Claude `--on-msg` fed the bus message as a trailing argument
+  after the variadic `--allowedTools`, which swallowed it, so no message
+  ever woke the rider (only on the no-`--model` path; `--model` masked it).
+  The message is now piped on stdin, order-independent. Fixes #1.
+
 ### Changed
 - README reframed around multi-human collaboration; honest walking-skeleton
   maturity banner added.
+
+### Corrections
+- Commit 56445bb's message credits the #1 fix to "a remote Claude rider"
+  and "@remote-claude's suggestion". That attribution is **unverified and
+  should not be relied on**. The bus authenticates no sender (T2) and wired
+  agents share the `joshuafuller` gh identity, so neither a bus `[sender]`
+  label nor GitHub authorship establishes origin. What is factual: the
+  finding and suggestion were *received on the bus* under the name
+  `remote-claude`; who actually produced them cannot be determined from the
+  bus. Root cause was a **name collision** — two sessions on one host both
+  sent as `--name remote-claude` (issue #3), a live instance of T2 in
+  ordinary use. The fix is correct on its own merits (verified against
+  source, regression-tested); only the credit is unsupported.
 
 ### Security
 - Participant names validated (`^[A-Za-z0-9._-]{1,64}$`) at every entry
