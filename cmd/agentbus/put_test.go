@@ -57,7 +57,7 @@ func TestPutRoundTripOverHub(t *testing.T) {
 	// a fire-and-forget send races the tunnel close and drops chunks.
 	done := make(chan int, 1)
 	var out strings.Builder
-	go func() { done <- runPutConn(requesterConn(t, h), "alice", "bob", src, nil, &out) }()
+	go func() { done <- runPutConn(requesterConn(t, h), "alice", "bob", src, 5*time.Minute, nil, &out) }()
 
 	select {
 	case n := <-notes:
@@ -121,7 +121,7 @@ func TestPutZeroByteRoundTrip(t *testing.T) {
 	}
 	done := make(chan int, 1)
 	var out strings.Builder
-	go func() { done <- runPutConn(requesterConn(t, h), "alice", "bob", src, nil, &out) }()
+	go func() { done <- runPutConn(requesterConn(t, h), "alice", "bob", src, 5*time.Minute, nil, &out) }()
 
 	deadline := time.After(5 * time.Second)
 	for {
@@ -144,13 +144,36 @@ func TestPutZeroByteRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPutUsesConfiguredTimeout(t *testing.T) {
+	client, peer := net.Pipe()
+	t.Cleanup(func() {
+		client.Close()
+		peer.Close()
+	})
+	src := filepath.Join(t.TempDir(), "payload.bin")
+	if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int, 1)
+	var out strings.Builder
+	go func() { done <- runPutConn(client, "alice", "bob", src, 50*time.Millisecond, nil, &out) }()
+	select {
+	case code := <-done:
+		if code != 2 {
+			t.Fatalf("timed-out put returned %d: %q", code, out.String())
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("put ignored the configured timeout")
+	}
+}
+
 func TestPutRefusesMissingFileAndBadRider(t *testing.T) {
 	h := bus.NewHub("host", nil)
 	var out strings.Builder
-	if code := runPutConn(requesterConn(t, h), "alice", "no [such] rider", "/dev/null", nil, &out); code != 2 {
+	if code := runPutConn(requesterConn(t, h), "alice", "no [such] rider", "/dev/null", 5*time.Minute, nil, &out); code != 2 {
 		t.Fatalf("invalid rider name: want exit 2, got %d", code)
 	}
-	if code := runPutConn(requesterConn(t, h), "alice", "bob", "/nonexistent/file", nil, &out); code != 2 {
+	if code := runPutConn(requesterConn(t, h), "alice", "bob", "/nonexistent/file", 5*time.Minute, nil, &out); code != 2 {
 		t.Fatalf("missing file: want exit 2, got %d", code)
 	}
 }

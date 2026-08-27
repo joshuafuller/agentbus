@@ -42,13 +42,13 @@ func runPut(ticket, name, rider, path string, timeout time.Duration) error {
 			os.Exit(2)
 		}
 	}
-	os.Exit(runPutConn(conn, name, rider, path, key, os.Stdout))
+	os.Exit(runPutConn(conn, name, rider, path, timeout, key, os.Stdout))
 	return nil
 }
 
 // runPutConn is the transport-independent body, split out so tests can
 // drive it over an in-memory hub. It owns closing conn.
-func runPutConn(conn net.Conn, name, rider, path string, key ed25519.PrivateKey, out io.Writer) int {
+func runPutConn(conn net.Conn, name, rider, path string, timeout time.Duration, key ed25519.PrivateKey, out io.Writer) int {
 	defer conn.Close()
 
 	if !bus.ValidName(rider) {
@@ -74,7 +74,9 @@ func runPutConn(conn net.Conn, name, rider, path string, key ed25519.PrivateKey,
 		return 2
 	}
 
-	conn.SetDeadline(time.Now().Add(5 * time.Minute))
+	if timeout > 0 {
+		conn.SetDeadline(time.Now().Add(timeout))
+	}
 	sc := bufio.NewScanner(conn)
 	sc.Buffer(make([]byte, 0, 64*1024), 256*1024)
 	if err := bus.ClientHello(conn, sc, name, false, key); err != nil {
