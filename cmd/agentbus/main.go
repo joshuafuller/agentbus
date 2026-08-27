@@ -29,6 +29,11 @@ import (
 // busPort is the virtual TCP port the bus speaks on inside the tunnel.
 const busPort = 2255
 
+// heartbeatEvery is how often a long-lived connection pings the hub.
+// A var so tests can shrink it; must stay well under the hub's default
+// QuietAfter or every healthy rider gets flagged unresponsive.
+var heartbeatEvery = 30 * time.Second
+
 const usage = `agentbus — a message bus for AI agents. One ticket, any number of riders.
 
 Usage:
@@ -330,7 +335,7 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 	// rider is idle — every join pings so the hub's liveness monitor
 	// can flag genuinely unresponsive participants (issue #8).
 	go func() {
-		t := time.NewTicker(30 * time.Second)
+		t := time.NewTicker(heartbeatEvery)
 		defer t.Stop()
 		for range t.C {
 			sendLine(bus.Ping())

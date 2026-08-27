@@ -326,3 +326,52 @@ func TestDeafRiderIsVisiblyDeaf(t *testing.T) {
 		t.Fatalf("output does not name the silence:\n%s", out.String())
 	}
 }
+
+// Liveness (#23 review): `task` also holds a long-lived connection — a
+// requester waiting on a slow task must heartbeat, or the hub flags it
+// unresponsive for simply waiting on its answer.
+func TestTaskRequesterHeartbeatsWhileWaiting(t *testing.T) {
+	old := heartbeatEvery
+	heartbeatEvery = 50 * time.Millisecond
+	defer func() { heartbeatEvery = old }()
+
+	h := bus.NewHub("host", nil)
+	h.QuietAfter = 300 * time.Millisecond
+	startRider(t, h, "worker", func(prompt string) (string, error) {
+		time.Sleep(900 * time.Millisecond) // silent long enough to flag a non-heartbeating requester
+		return "done", nil
+	})
+
+	obs, srv := net.Pipe()
+	t.Cleanup(func() { obs.Close() })
+	go h.Serve(srv)
+	if _, err := obs.Write([]byte(bus.Hello("observer") + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	notices := make(chan string, 64)
+	go func() {
+		sc := bufio.NewScanner(obs)
+		for sc.Scan() {
+			notices <- sc.Text()
+		}
+	}()
+
+	done := make(chan int, 1)
+	var out strings.Builder
+	go func() {
+		done <- runTaskConn(requesterConn(t, h), "alice", "worker", "slow", 5*time.Second, nil, &out)
+	}()
+	for {
+		select {
+		case code := <-done:
+			if code != 0 {
+				t.Fatalf("slow task failed: exit %d, output %q", code, out.String())
+			}
+			return
+		case l := <-notices:
+			if strings.Contains(l, "alice") && strings.Contains(l, "unresponsive") {
+				t.Fatalf("waiting requester flagged unresponsive: %q", l)
+			}
+		}
+	}
+}

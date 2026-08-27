@@ -963,3 +963,41 @@ func TestPingIsConsumedNotRelayed(t *testing.T) {
 		t.Fatalf("bob got %q — a PING leaked onto the feed", l)
 	}
 }
+
+// The unresponsive notice must report the rider's ACTUAL silence, not
+// the flagging threshold (#23 review): "last seen 0s ago" under a
+// sub-second QuietAfter told the driver nothing.
+func TestUnresponsiveNoticeReportsActualSilence(t *testing.T) {
+	h := NewHub("host", nil)
+	h.QuietAfter = 300 * time.Millisecond
+	testPeer(t, h, "sleeper")
+	_, obsLines := testPeer(t, h, "observer")
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case l := <-obsLines:
+			if !IsNotice(l) || !strings.Contains(l, "sleeper") || !strings.Contains(l, "unresponsive") {
+				continue
+			}
+			_, rest, ok := strings.Cut(l, "last seen ")
+			if !ok {
+				t.Fatalf("notice has no last-seen clause: %q", l)
+			}
+			field, _, ok := strings.Cut(rest, " ago")
+			if !ok {
+				t.Fatalf("notice has no ago clause: %q", l)
+			}
+			d, err := time.ParseDuration(field)
+			if err != nil {
+				t.Fatalf("unparseable silence %q in notice %q", field, l)
+			}
+			if d < h.QuietAfter {
+				t.Fatalf("notice reports %v of silence, but the rider was quiet at least %v: %q", d, h.QuietAfter, l)
+			}
+			return
+		case <-deadline:
+			t.Fatal("sleeper never flagged")
+		}
+	}
+}

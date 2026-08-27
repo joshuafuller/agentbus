@@ -413,23 +413,37 @@ func (h *Hub) monitor() {
 	}
 	t := time.NewTicker(quiet / 3)
 	defer t.Stop()
+	type flagged struct {
+		name   string
+		silent time.Duration
+	}
 	for range t.C {
-		var flag []string
+		var flag []flagged
 		h.mu.Lock()
 		for _, p := range h.peers {
 			if p.oneshot || p.seen == nil {
 				continue
 			}
-			if !*p.flagged && time.Since(*p.seen) > quiet {
+			if silent := time.Since(*p.seen); !*p.flagged && silent > quiet {
 				*p.flagged = true
-				flag = append(flag, p.name)
+				flag = append(flag, flagged{p.name, silent})
 			}
 		}
 		h.mu.Unlock()
-		for _, name := range flag {
-			h.notice(fmt.Sprintf("%s is unresponsive — last seen %s ago (deaf riders look exactly like idle ones; this is the difference)", name, quiet.Round(time.Second)), nil)
+		for _, f := range flag {
+			h.notice(fmt.Sprintf("%s is unresponsive — last seen %s ago (deaf riders look exactly like idle ones; this is the difference)", f.name, sinceText(f.silent)), nil)
 		}
 	}
+}
+
+// sinceText renders an elapsed silence for the feed: whole seconds
+// once it is at least a second, milliseconds below that — never a
+// misleading "0s".
+func sinceText(d time.Duration) string {
+	if d >= time.Second {
+		return d.Round(time.Second).String()
+	}
+	return d.Round(time.Millisecond).String()
 }
 
 // AckLocal acknowledges a host-addressed envelope: the host durably

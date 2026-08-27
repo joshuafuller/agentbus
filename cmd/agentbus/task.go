@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -79,11 +80,38 @@ func runTaskConn(conn net.Conn, name, rider, prompt string, timeout time.Duratio
 		return 2
 	}
 
-	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(prompt))
-	fmt.Fprintf(conn, "%s\n", bus.Addressed(rider, task.EncodeMessage(msg)))
+	// Two goroutines write after this point (ACKs and heartbeats): one
+	// lock so lines never interleave on the wire.
+	var wmu sync.Mutex
+	writeLine := func(line string) {
+		wmu.Lock()
+		defer wmu.Unlock()
+		fmt.Fprintf(conn, "%s\n", line)
+	}
 
-	// The hub delivers addressed lines as envelopes: ACK each (from
-	// this goroutine — the only writer once the request is sent), drop
+	// Waiting is not deafness: this is a long-lived, non-oneshot
+	// connection, so it must heartbeat like any rider or the hub flags
+	// the requester unresponsive for sitting out a slow task (#23
+	// review). Stopped on return via hbStop.
+	hbStop := make(chan struct{})
+	defer close(hbStop)
+	go func() {
+		t := time.NewTicker(heartbeatEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				writeLine(bus.Ping())
+			case <-hbStop:
+				return
+			}
+		}
+	}()
+
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(prompt))
+	writeLine(bus.Addressed(rider, task.EncodeMessage(msg)))
+
+	// The hub delivers addressed lines as envelopes: ACK each, drop
 	// duplicates, and hand Watch the plain line it expects.
 	pr, pw := io.Pipe()
 	// Closing the read end on return unblocks a writer goroutine caught
@@ -98,7 +126,7 @@ func runTaskConn(conn net.Conn, name, rider, prompt string, timeout time.Duratio
 			line := sc.Text()
 			if from, body, ok := bus.ParseMessage(line); ok {
 				if id, payload, isEnv := bus.ParseEnvelope(body); isEnv {
-					fmt.Fprintf(conn, "%s\n", bus.Ack(id))
+					writeLine(bus.Ack(id))
 					if seen.Seen(id) {
 						continue
 					}
