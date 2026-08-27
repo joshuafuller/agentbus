@@ -184,6 +184,14 @@ func runHost(name string, sink *bus.Sink) error {
 	// Task lifecycle transitions become feed notices every driver sees
 	// (issue #12). Injected here because bus cannot import task.
 	hub.TaskNotice = task.TransitionNotice
+	// Gate 3: addressed lines for absent riders wait on disk and flush
+	// when the name rejoins. 24h is long enough to sleep on a task and
+	// short enough that a renamed rider's spool does not rot forever.
+	if home, err := os.UserHomeDir(); err == nil {
+		hub.Spool = bus.NewFileSpool(filepath.Join(home, ".agentbus", "spool"), 24*time.Hour)
+	} else {
+		fmt.Fprintf(os.Stderr, "agentbus: no home dir (%v) — offline spool disabled\n", err)
+	}
 	srv := &tailcat.Server{
 		Logf: logf(),
 		OnTCP: func(port uint16) func(net.Conn) {

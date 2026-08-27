@@ -140,6 +140,37 @@ func TestTaskFailureExitsNonzero(t *testing.T) {
 	}
 }
 
+// A finished requester must leave the bus. runTask exits via os.Exit,
+// which skips defers — if runTaskConn does not close the connection
+// itself, the hub keeps a ghost peer under the requester's name that
+// swallows every line addressed to it (results written to the ghost
+// instead of the spool; observed live: bob's completed snapshot
+// vanished into a dead tunnel).
+func TestRunTaskConnClosesConnWhenDone(t *testing.T) {
+	h := bus.NewHub("host", nil)
+	startRider(t, h, "worker", nil) // deaf: runTaskConn returns on timeout
+
+	var out strings.Builder
+	runTaskConn(requesterConn(t, h), "alice", "worker", "x", 500*time.Millisecond, &out)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		gone := true
+		for _, p := range h.Peers() {
+			if p == "alice" {
+				gone = false
+			}
+		}
+		if gone {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("alice is still on the bus after runTaskConn returned: %v", h.Peers())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // The acceptance test of the whole slice: a deaf rider must be visibly
 // deaf. The rider is joined and welcomed but never executes; the
 // requester must come back saying the task was never acknowledged,

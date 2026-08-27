@@ -30,15 +30,19 @@ func runTask(ticket, name, rider, prompt string, timeout time.Duration) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
 	code := runTaskConn(conn, name, rider, prompt, timeout, os.Stdout)
 	os.Exit(code)
 	return nil
 }
 
 // runTaskConn is the transport-independent body of runTask, split out
-// so tests can drive it over an in-memory hub.
+// so tests can drive it over an in-memory hub. It closes conn before
+// returning: runTask exits via os.Exit, which skips defers, and an
+// unclosed tunnel conn leaves a ghost peer on the hub that swallows
+// every line addressed to this name — results would reach the ghost
+// instead of the spool.
 func runTaskConn(conn net.Conn, name, rider, prompt string, timeout time.Duration, out io.Writer) int {
+	defer conn.Close()
 	deadline := time.Now().Add(timeout)
 	conn.SetReadDeadline(deadline)
 
