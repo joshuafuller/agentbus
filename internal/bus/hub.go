@@ -32,6 +32,14 @@ type Hub struct {
 	// before the pump redelivers it. Zero means the 5s default.
 	RetryInterval time.Duration
 
+	// QuietAfter is how long a rider may go silent (no lines, no PING
+	// heartbeats) before the feed flags it unresponsive — deaf becomes
+	// a visible state instead of looking identical to idle (issue #8).
+	// Zero means the 90s default.
+	QuietAfter time.Duration
+
+	monitorOnce sync.Once
+
 	// TaskNotice, if non-nil, inspects each addressed payload the hub
 	// relays and may return a feed notice describing it — how task
 	// lifecycle transitions become visible to every driver (issue #12)
@@ -70,6 +78,8 @@ type peer struct {
 	out     chan string   // per-peer write queue; one writer goroutine drains it
 	kick    chan struct{} // wakes the pump when a new addressed line spools
 	acks    chan string   // envelope ids the peer has acknowledged
+	seen    *time.Time    // last line (or heartbeat) from this peer; monitor reads under h.mu
+	flagged *bool         // currently announced as unresponsive
 }
 
 // NewHub returns a hub for a host participating under name.
@@ -208,8 +218,11 @@ func (h *Hub) Serve(conn net.Conn) {
 			delete(h.peers, stale)
 		}
 	}
+	now := time.Now()
+	flagged := false
 	me := peer{name: name, oneshot: oneshot, out: out,
-		kick: make(chan struct{}, 1), acks: make(chan string, outboxDepth)}
+		kick: make(chan struct{}, 1), acks: make(chan string, outboxDepth),
+		seen: &now, flagged: &flagged}
 	h.peers[conn] = me
 	n := 1 // the host
 	for _, p := range h.peers {
@@ -263,8 +276,25 @@ func (h *Hub) Serve(conn net.Conn) {
 		}
 	}
 
+	if !oneshot {
+		h.monitorOnce.Do(func() { go h.monitor() })
+	}
+
 	for sc.Scan() {
 		line := sc.Text()
+		h.mu.Lock()
+		*me.seen = time.Now()
+		if *me.flagged {
+			*me.flagged = false
+			h.mu.Unlock()
+			h.notice(fmt.Sprintf("%s is responsive again", name), nil)
+		} else {
+			h.mu.Unlock()
+		}
+		// Heartbeats only refresh last-seen; consumed, never relayed.
+		if IsPing(line) {
+			continue
+		}
 		// ACKs are control traffic between this peer and its pump —
 		// consumed here, never relayed.
 		if id, ok := ParseAck(line); ok {
@@ -371,6 +401,49 @@ func (h *Hub) pump(conn net.Conn, me peer, name string) {
 		case <-time.After(retry / 2):
 		}
 	}
+}
+
+// monitor watches rider last-seen times and flags silence on the feed
+// (issue #8): deaf must be visibly deaf. One goroutine per hub,
+// started with the first rider; ticks at a fraction of the threshold.
+func (h *Hub) monitor() {
+	quiet := h.QuietAfter
+	if quiet <= 0 {
+		quiet = 90 * time.Second
+	}
+	t := time.NewTicker(quiet / 3)
+	defer t.Stop()
+	type flagged struct {
+		name   string
+		silent time.Duration
+	}
+	for range t.C {
+		var flag []flagged
+		h.mu.Lock()
+		for _, p := range h.peers {
+			if p.oneshot || p.seen == nil {
+				continue
+			}
+			if silent := time.Since(*p.seen); !*p.flagged && silent > quiet {
+				*p.flagged = true
+				flag = append(flag, flagged{p.name, silent})
+			}
+		}
+		h.mu.Unlock()
+		for _, f := range flag {
+			h.notice(fmt.Sprintf("%s is unresponsive — last seen %s ago (deaf riders look exactly like idle ones; this is the difference)", f.name, sinceText(f.silent)), nil)
+		}
+	}
+}
+
+// sinceText renders an elapsed silence for the feed: whole seconds
+// once it is at least a second, milliseconds below that — never a
+// misleading "0s".
+func sinceText(d time.Duration) string {
+	if d >= time.Second {
+		return d.Round(time.Second).String()
+	}
+	return d.Round(time.Millisecond).String()
 }
 
 // AckLocal acknowledges a host-addressed envelope: the host durably
