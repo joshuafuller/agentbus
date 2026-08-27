@@ -88,8 +88,8 @@ func runPutConn(conn net.Conn, name, rider, path string, timeout time.Duration, 
 		return 2
 	}
 
-	// Hash and chunk the file in one streaming pass so a large artifact
-	// is never held whole in memory (issue #2 streaming note).
+	// Hash the file, then stream it in a second pass for chunking so a large
+	// artifact is never held whole in memory (issue #2 streaming note).
 	id, err := bus.NewNonce()
 	if err != nil {
 		fmt.Fprintf(out, "could not start transfer: %v\n", err)
