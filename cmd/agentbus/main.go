@@ -43,6 +43,8 @@ Usage:
   agentbus version                      print version information
   agentbus task <ticket> <rider> <msg>  send an A2A task to one rider and
                                         follow it to completion or failure
+  agentbus put <ticket> <rider> <file>  stream a file to one rider out of
+                                        band; the agent sees one FILE line
   agentbus invite <ticket> [flags]      print a copy-paste boarding pass
                                         that onboards a fresh agent
   agentbus await [--inbox <file>]       block until unread messages exist,
@@ -115,6 +117,16 @@ func main() {
 			os.Exit(2)
 		}
 		err = runTask(ticket, *name, fs.Arg(0), strings.Join(fs.Args()[1:], " "), *timeout)
+	case "put":
+		ticket, rest := popTicket(args)
+		timeout := fs.Duration("timeout", 10*time.Minute, "give up if the transfer has not finished by then")
+		fs.Parse(rest)
+		validateName()
+		if fs.NArg() < 2 {
+			fmt.Fprintln(os.Stderr, "agentbus: put needs a rider name and a file path")
+			os.Exit(2)
+		}
+		err = runPut(ticket, *name, fs.Arg(0), fs.Arg(1), *timeout)
 	case "await":
 		fs.Parse(args)
 		err = runAwait(*inbox)
@@ -356,6 +368,18 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 			}
 		}
 	}()
+	// Blob transfers (issue #2) reassemble into a content-addressed
+	// spool; the agent gets one FILE notice per file, never the bytes.
+	var blobs *bus.BlobReceiver
+	if home, err := os.UserHomeDir(); err == nil {
+		blobDir := filepath.Join(home, ".agentbus", "blobs")
+		if err := os.MkdirAll(blobDir, 0o700); err == nil {
+			blobs = bus.NewBlobReceiver(blobDir, 0, func(l string) { sink.Deliver(l) })
+			// The delivery receipt goes back to the sender as an
+			// addressed line, so `put` knows the bytes landed.
+			blobs.Reply = func(to, line string) { sendLine(bus.Addressed(to, line)) }
+		}
+	}
 	// At-least-once delivery: the hub redelivers unACKed envelopes, so
 	// remember recent ids and re-ACK duplicates without reprocessing.
 	seen := bus.NewDedup(1024)
@@ -384,6 +408,18 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 				if seen.Has(id) {
 					sendLine(bus.Ack(id)) // duplicate chat: re-ACK, don't reprocess
 					continue
+				}
+				// A blob frame is spooled out of band, not delivered to
+				// the agent. ACK only once the receiver accepts it, the
+				// same at-least-once contract as chat.
+				if blobs != nil {
+					if consumed, ok := blobs.Offer(from, payload); consumed {
+						if ok {
+							seen.Seen(id)
+							sendLine(bus.Ack(id))
+						}
+						continue
+					}
 				}
 				// Record the id only AFTER acceptance: marking first
 				// would turn a failed delivery's redelivery into an
