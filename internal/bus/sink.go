@@ -52,7 +52,8 @@ func (s *Sink) Deliver(line string) {
 		fmt.Fprintln(s.Out, line)
 	}
 	if s.Inbox != "" {
-		f, err := os.OpenFile(s.Inbox, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		// 0600: the inbox is a plaintext record of bus traffic.
+		f, err := os.OpenFile(s.Inbox, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "agentbus: inbox: %v\n", err)
 		} else {

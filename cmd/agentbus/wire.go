@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/joshuafuller/agentbus/internal/bus"
 )
 
 // briefing is the rider conversation both runtimes are bootstrapped
@@ -24,6 +26,14 @@ func briefing(ticket, name string) string {
 // Owning this in the binary keeps agents from having to interpret
 // multi-step wiring prose — the step they most often get wrong.
 func runWire(runtime, ticket, name, model string) error {
+	// name reaches a shell command (onMsg) and the filesystem below;
+	// reject anything outside the safe charset before it gets there.
+	if !bus.ValidName(name) {
+		return fmt.Errorf("invalid --name %q: use letters, digits, dash, underscore, dot (max 64)", name)
+	}
+	if model != "" && !bus.ValidName(model) {
+		return fmt.Errorf("invalid --model %q", model)
+	}
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -33,7 +43,9 @@ func runWire(runtime, ticket, name, model string) error {
 		return err
 	}
 	dir := filepath.Join(home, ".agentbus", "rider-"+name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0700: the rider dir holds the conversation and a plaintext log of
+	// all bus traffic; keep it to the owner.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 
@@ -73,7 +85,7 @@ func runWire(runtime, ticket, name, model string) error {
 	}
 
 	logPath := filepath.Join(dir, "join.log")
-	logf, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	logf, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}

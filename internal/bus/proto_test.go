@@ -38,6 +38,30 @@ func TestMessageWithBracketsInText(t *testing.T) {
 	}
 }
 
+func TestValidName(t *testing.T) {
+	good := []string{"codex-1", "claude_laptop", "hub", "a.b.c", "A1"}
+	for _, n := range good {
+		if !ValidName(n) {
+			t.Errorf("ValidName(%q) = false, want true", n)
+		}
+	}
+	// Shell metacharacters, spaces, path traversal, brackets, over-length.
+	bad := []string{"", "a b", "x;rm -rf ~", "a$(id)", "../etc", "a/b", "[a]", "a|b", "a&b", "a`b`", strings_repeat("a", 65)}
+	for _, n := range bad {
+		if ValidName(n) {
+			t.Errorf("ValidName(%q) = true, want false (injection/oversize risk)", n)
+		}
+	}
+}
+
+func strings_repeat(s string, n int) string {
+	out := ""
+	for i := 0; i < n; i++ {
+		out += s
+	}
+	return out
+}
+
 func TestNotice(t *testing.T) {
 	if !IsNotice(Notice("codex-1 hopped on the bus")) {
 		t.Fatal("Notice output not recognized by IsNotice")

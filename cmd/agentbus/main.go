@@ -65,18 +65,31 @@ func main() {
 	inbox := fs.String("inbox", "", "append received messages to this file")
 	onMsg := fs.String("on-msg", "", "shell command run per received message")
 
+	// Names reach the wire protocol, the filesystem, and (via wire)
+	// shell commands. Validate once, centrally, for every subcommand
+	// that takes one.
+	validateName := func() {
+		if !bus.ValidName(*name) {
+			fmt.Fprintf(os.Stderr, "agentbus: invalid --name %q: letters, digits, dash, underscore, dot (max 64)\n", *name)
+			os.Exit(2)
+		}
+	}
+
 	var err error
 	switch cmd {
 	case "host":
 		fs.Parse(args)
+		validateName()
 		err = runHost(*name, sinkFor(*inbox, *onMsg))
 	case "join":
 		ticket, rest := popTicket(args)
 		fs.Parse(rest)
+		validateName()
 		err = runJoin(ticket, *name, sinkFor(*inbox, *onMsg))
 	case "send":
 		ticket, rest := popTicket(args)
 		fs.Parse(rest)
+		validateName()
 		err = runSend(ticket, *name, strings.Join(fs.Args(), " "))
 	case "await":
 		fs.Parse(args)

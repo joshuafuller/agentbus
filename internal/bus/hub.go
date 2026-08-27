@@ -24,6 +24,10 @@ type Hub struct {
 	peers map[net.Conn]peer
 }
 
+// maxLineBytes bounds a single bus line. Generous for real messages
+// (task descriptions, results) while blocking abuse.
+const maxLineBytes = 256 * 1024
+
 type peer struct {
 	name    string
 	oneshot bool // write-only sender: receives no relays
@@ -40,6 +44,10 @@ func NewHub(name string, sink func(line string)) *Hub {
 func (h *Hub) Serve(conn net.Conn) {
 	defer conn.Close()
 	sc := bufio.NewScanner(conn)
+	// Cap line length so one rider cannot force unbounded buffering in
+	// the hub or an unbounded append to every rider's inbox. A line
+	// over the cap ends that connection; it does not stall the bus.
+	sc.Buffer(make([]byte, 0, 64*1024), maxLineBytes)
 	if !sc.Scan() {
 		return
 	}

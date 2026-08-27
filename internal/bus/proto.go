@@ -10,8 +10,20 @@ package bus
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+// validName matches names safe to embed in shell strings, file paths,
+// and the wire protocol: letters, digits, dash, underscore, dot.
+var validName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// ValidName reports whether a participant name is safe to use. Names
+// reach shell commands (wire --on-msg) and the filesystem (rider dirs),
+// so anything outside a conservative charset is rejected at the edge.
+func ValidName(name string) bool {
+	return validName.MatchString(name)
+}
 
 // Hello formats a rider's greeting line (without newline).
 func Hello(name string) string {

@@ -165,8 +165,9 @@ message content cannot inject).
 
 > [!WARNING]
 > **The ticket is the key.** Anyone holding it is on the bus and can send
-> tasks to every wired rider. Treat tickets like passwords; rotate by
-> restarting the host.
+> tasks to every wired rider. Treat tickets like passwords. There is no
+> per-rider revocation yet — invalidating a ticket means restarting the
+> host (a known limitation, see [SECURITY.md](SECURITY.md)).
 
 > [!IMPORTANT]
 > A wired rider executes shell commands autonomously — that is the
@@ -179,8 +180,16 @@ message content cannot inject).
   connections).
 - Remote message content reaches `--on-msg` commands only via environment
   variables — no shell injection surface.
+- Participant names are validated (`[A-Za-z0-9._-]`, ≤64) at every entry
+  point, so a name can't inject into the wiring shell command.
+- Bus history on disk (inbox, rider log) is owner-only (`0600`/`0700`).
 - The installer is delivered as *download → review → run*, never blind
   `curl | sh`.
+
+**Read the full threat model in [SECURITY.md](SECURITY.md)** — including
+the by-design remote-execution property (T1) and sender spoofing (T2),
+which you must understand before wiring a rider on a machine you care
+about.
 
 ## Honest limits
 
