@@ -34,8 +34,9 @@ type FileSpool struct {
 	dir string
 	ttl time.Duration
 
-	mu  sync.Mutex
-	seq int // tie-breaker for same-nanosecond adds
+	mu     sync.Mutex
+	seq    int   // tie-breaker for same-stamp adds
+	lastNs int64 // last stamp issued; stamps never go backwards
 }
 
 // NewFileSpool returns a spool rooted at dir. ttl bounds how long an
@@ -55,7 +56,17 @@ func (s *FileSpool) Add(rider, line string) error {
 	}
 	s.mu.Lock()
 	s.seq++
-	name := fmt.Sprintf("%019d-%06d.line", time.Now().UnixNano(), s.seq)
+	// The filename is the sort key, so the stamp must never run
+	// backwards: the wall clock can (NTP step, VM resume), and a
+	// backwards step would scramble drain order mid-stream. Clamp to
+	// strictly increasing within this instance; across restarts the
+	// wall anchor keeps rough order and the TTL its meaning.
+	ns := time.Now().UnixNano()
+	if ns <= s.lastNs {
+		ns = s.lastNs + 1
+	}
+	s.lastNs = ns
+	name := fmt.Sprintf("%019d-%06d.line", ns, s.seq)
 	s.mu.Unlock()
 	tmp := filepath.Join(rdir, name+".tmp")
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)

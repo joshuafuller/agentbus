@@ -364,8 +364,30 @@ func TestCatchUpBeyondOutboxLosesNothing(t *testing.T) {
 
 	_, rLines := testPeer(t, h, "returning")
 
+	// Throttle: do not read yet. A fast reader empties the outbox as
+	// the drain fills it, so everything fits and overflow is never
+	// exercised. With the reader parked, the outbox fills, the drain
+	// stops at headroom, and the remainder must stay spooled. Wait for
+	// the pending count to stabilize at a nonzero value.
+	prev := -1
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		cur := h.Spool.Pending("returning")
+		if cur > 0 && cur == prev {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("drain never stabilized with a parked reader (pending=%d)", cur)
+		}
+		prev = cur
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// Read until the stream goes quiet: entries in flight (removed from
+	// the spool, sitting in the outbox) make a mid-drain count racy, so
+	// the invariant is only checkable at quiescence.
 	received := 0
-	timeout := time.After(5 * time.Second)
+	overall := time.After(10 * time.Second)
 collect:
 	for {
 		select {
@@ -374,19 +396,16 @@ collect:
 				t.Fatalf("connection closed during catch-up after %d lines", received)
 			}
 			if !IsNotice(l) {
-				want := fmt.Sprintf("[a] m%04d", received)
-				if l != Message("a", fmt.Sprintf("m%04d", received)) {
+				want := fmt.Sprintf("m%04d", received)
+				if l != Message("a", want) {
 					t.Fatalf("line %d out of order: got %q want ...%q", received, l, want)
 				}
 				received++
 			}
-		case <-timeout:
-			t.Fatal("catch-up stalled")
-		}
-		if received+h.Spool.Pending("returning") == total && received > 0 {
-			// Drained all the outbox will take; the rest must still be
-			// on disk, not lost.
-			break collect
+		case <-time.After(700 * time.Millisecond):
+			break collect // quiescent
+		case <-overall:
+			t.Fatal("catch-up never went quiet")
 		}
 	}
 	if received+h.Spool.Pending("returning") != total {

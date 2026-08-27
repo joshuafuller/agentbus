@@ -3,6 +3,7 @@ package task
 import (
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -110,7 +111,12 @@ func TestRiderHandlesTaskMessage(t *testing.T) {
 // which may not stall for the length of a model turn.
 func TestRiderSerializesTaskExecution(t *testing.T) {
 	var mu sync.Mutex
-	running, maxRunning, runs := 0, 0, 0
+	running, maxRunning := 0, 0
+	// Completion is counted on the TERMINAL snapshot leaving Send: it
+	// is emitted after the task's final disk write, so waiting on it
+	// (not on runner exit) means the worker is truly done before
+	// t.TempDir cleanup runs.
+	terminal := make(chan struct{}, 8)
 	r := &Rider{
 		Dir: t.TempDir(),
 		Runner: func(prompt string) (string, error) {
@@ -123,11 +129,16 @@ func TestRiderSerializesTaskExecution(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 			mu.Lock()
 			running--
-			runs++
 			mu.Unlock()
 			return "ok", nil
 		},
-		Send: func(string) {},
+		Send: func(line string) {
+			if _, payload, ok := bus.ParseAddressed(line); ok {
+				if tk, ok := DecodeTask(payload); ok && tk.Status.State.Terminal() {
+					terminal <- struct{}{}
+				}
+			}
+		},
 	}
 
 	start := time.Now()
@@ -141,19 +152,15 @@ func TestRiderSerializesTaskExecution(t *testing.T) {
 		t.Fatalf("Handle blocked the caller for %v; it must enqueue and return", d)
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		mu.Lock()
-		done := runs == 3
-		mu.Unlock()
-		if done {
-			break
+	for done := 0; done < 3; done++ {
+		select {
+		case <-terminal:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("only %d/3 tasks reached a terminal state", done)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d/3 tasks ran", runs)
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if maxRunning != 1 {
 		t.Fatalf("runner overlapped: %d concurrent invocations, want 1", maxRunning)
 	}
@@ -164,13 +171,33 @@ func TestRiderSerializesTaskExecution(t *testing.T) {
 // a task the rider silently discarded. (PR #15 review.)
 func TestRiderRejectsWhenQueueFull(t *testing.T) {
 	block := make(chan struct{})
-	sent := make(chan string, 256)
+	sent := make(chan string, 1024)
+	// Terminal snapshots are emitted after each task's final disk
+	// write, so counting them is the safe "worker is done" signal.
+	var terminals atomic.Int32
 	r := &Rider{
 		Dir:    t.TempDir(),
 		Runner: func(string) (string, error) { <-block; return "ok", nil },
-		Send:   func(line string) { sent <- line },
+		Send: func(line string) {
+			if _, payload, ok := bus.ParseAddressed(line); ok {
+				if tk, ok := DecodeTask(payload); ok && tk.Status.State.Terminal() {
+					terminals.Add(1)
+				}
+			}
+			sent <- line
+		},
 	}
-	defer close(block)
+	// Cleanup order matters: release the worker, then WAIT until every
+	// task (queued completions + the rejection) has reached its
+	// terminal state before t.TempDir is removed — otherwise the worker
+	// races the cleanup, still writing task files.
+	defer func() {
+		close(block)
+		deadline := time.Now().Add(10 * time.Second)
+		for terminals.Load() < int32(taskQueueDepth+2) && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
 
 	// One running + fill the queue, then one more.
 	for i := 0; i < taskQueueDepth+2; i++ {
