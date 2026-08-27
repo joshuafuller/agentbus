@@ -56,12 +56,12 @@ repository, creates the branch, and runs the prompt. The script has no
 
 ## Security posture
 
-The approvals and sandbox bypass is intentional for headless work, but it is
+The approvals bypass and sandbox bypass are intentional for headless work, but they are
 confined to the container's throwaway filesystem. The container does not use a
 host worktree. It is removed after the run, so session state created inside it
 dies with the container.
 
-The host's `gh auth token` is minted for each run and passed as `GH_TOKEN`.
+The host's existing `gh auth token` is read and passed as `GH_TOKEN`.
 The Codex auth seed is mounted read-only, and the prompt file is mounted
-read-only. The worker can still reach the repository over HTTPS with that
-per-run token, so the token's GitHub permissions still matter.
+read-only. The worker can still reach the repository over HTTPS with the
+host token, so the token's GitHub permissions still matter.
