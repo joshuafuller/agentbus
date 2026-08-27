@@ -53,10 +53,32 @@ func (s *FileSpool) Add(rider, line string) error {
 	name := fmt.Sprintf("%019d-%06d.line", time.Now().UnixNano(), s.seq)
 	s.mu.Unlock()
 	tmp := filepath.Join(rdir, name+".tmp")
-	if err := os.WriteFile(tmp, []byte(line), 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(rdir, name))
+	if _, err := f.WriteString(line); err != nil {
+		f.Close()
+		return err
+	}
+	// The spool's one job is surviving a host crash: fsync the entry
+	// before the rename, and the directory after, or "durably stored"
+	// is only a page-cache promise (PR #14 review).
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, filepath.Join(rdir, name)); err != nil {
+		return err
+	}
+	if d, err := os.Open(rdir); err == nil {
+		d.Sync()
+		d.Close()
+	}
+	return nil
 }
 
 // Drain returns and removes every unexpired spooled line for a rider,
@@ -101,6 +123,44 @@ func (s *FileSpool) Pending(rider string) int {
 		return 0
 	}
 	return len(names)
+}
+
+// SweepExpired deletes expired entries for EVERY rider name, so the
+// TTL bounds disk usage even for names that never rejoin (misspelled,
+// renamed, abandoned). Empty rider dirs are removed. Run it at host
+// startup; Drain still expires per-rider on join.
+func (s *FileSpool) SweepExpired() error {
+	if s.ttl <= 0 {
+		return nil
+	}
+	riders, err := os.ReadDir(s.dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, r := range riders {
+		if !r.IsDir() {
+			continue
+		}
+		rdir := filepath.Join(s.dir, r.Name())
+		names, err := spoolEntries(rdir)
+		if err != nil {
+			return err
+		}
+		remaining := len(names)
+		for _, name := range names {
+			if s.expired(name) {
+				os.Remove(filepath.Join(rdir, name))
+				remaining--
+			}
+		}
+		if remaining == 0 {
+			os.Remove(rdir) // fails harmlessly if non-empty
+		}
+	}
+	return nil
 }
 
 func (s *FileSpool) riderDir(rider string) (string, error) {

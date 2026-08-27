@@ -173,7 +173,9 @@ func TestTaskNoticeHookBroadcastsTransition(t *testing.T) {
 	}
 	select {
 	case l := <-carolLines:
-		t.Fatalf("carol also received %q; the payload must stay addressed", l)
+		if !IsNotice(l) {
+			t.Fatalf("carol also received %q; the payload must stay addressed", l)
+		}
 	case <-time.After(100 * time.Millisecond):
 	}
 	// Alice still receives the payload itself.
@@ -306,6 +308,41 @@ func TestBroadcastLinesAreNotSpooled(t *testing.T) {
 			t.Fatalf("late rider received %q, want nothing but notices", l)
 		}
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// The spool handoff must be atomic with joins: if the absence check,
+// the spool add, and the join-time drain are not serialized, a line
+// sent while the rider is joining can land in the spool AFTER the
+// drain ran — stranded until the next reconnect. (PR #14 review.)
+// This drives the interleaving repeatedly; under the racy
+// implementation a run of 30 reliably strands at least one line.
+func TestConcurrentSendAndJoinNeverStrandsALine(t *testing.T) {
+	for i := 0; i < 30; i++ {
+		h := NewHub("host", nil)
+		h.Spool = NewFileSpool(t.TempDir(), time.Hour)
+		a, _ := testPeer(t, h, "alice")
+
+		go a.Write([]byte(Addressed("flappy", "payload") + "\n"))
+		_, rLines := testPeer(t, h, "flappy")
+
+		// The line must reach flappy — live or via drain. If it went to
+		// the spool after the drain, nothing will ever deliver it.
+		deadline := time.After(2 * time.Second)
+		for {
+			var l string
+			select {
+			case l = <-rLines:
+			case <-deadline:
+				t.Fatalf("iteration %d: line stranded (pending=%d)", i, h.Spool.Pending("flappy"))
+			}
+			if !IsNotice(l) {
+				if l != Message("alice", "payload") {
+					t.Fatalf("flappy got %q", l)
+				}
+				break
+			}
+		}
 	}
 }
 
@@ -515,6 +552,39 @@ func TestDisplacedPeerIsToldWhy(t *testing.T) {
 		case <-deadline:
 			t.Fatal("timed out waiting for the displacement notice")
 		}
+	}
+}
+
+// A displaced peer that stopped reading must not stall its
+// replacement: the notify-and-close of the stale conn is best-effort
+// and must happen off the join path, or the new connection's read loop
+// is blocked behind a 5s write deadline. (PR #9 review.)
+func TestStalledDisplacedPeerDoesNotBlockReplacement(t *testing.T) {
+	h := NewHub("host", nil)
+
+	// Stale codex stops reading entirely: raw pipe, HELLO, read only
+	// the welcome, then nothing — its buffer is full for any write.
+	staleClient, staleServer := net.Pipe()
+	t.Cleanup(func() { staleClient.Close() })
+	go h.Serve(staleServer)
+	staleClient.Write([]byte(Hello("codex") + "\n"))
+	br := bufio.NewReader(staleClient)
+	br.ReadString('\n') // welcome; after this, no more reads
+
+	_, obsLines := testPeer(t, h, "observer")
+	fresh, _ := testPeer(t, h, "codex") // displaces the stalled conn
+
+	// The fresh codex speaks immediately; the observer must hear it
+	// fast — not after the stale write deadline expires.
+	start := time.Now()
+	if _, err := fresh.Write([]byte("alive and talking\n")); err != nil {
+		t.Fatal(err)
+	}
+	if l := recvMessage(t, obsLines); l != Message("codex", "alive and talking") {
+		t.Fatalf("observer got %q", l)
+	}
+	if d := time.Since(start); d > 1500*time.Millisecond {
+		t.Fatalf("fresh join's traffic delayed %v by the stalled displaced peer", d)
 	}
 }
 

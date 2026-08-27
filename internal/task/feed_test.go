@@ -3,6 +3,7 @@ package task
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 )
@@ -25,7 +26,7 @@ func TestTransitionNoticeNamesStateAndParties(t *testing.T) {
 	if !ok {
 		t.Fatal("TransitionNotice rejected a task snapshot")
 	}
-	short := string(tk.ID)[:8]
+	short := shortID(tk.ID)
 	for _, want := range []string{"task " + short, "working", "alice → codex-luna"} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("notice %q missing %q", line, want)
@@ -54,7 +55,7 @@ func TestRenderLineForCompletedSnapshot(t *testing.T) {
 	if !ok {
 		t.Fatal("RenderLine rejected a task snapshot")
 	}
-	short := string(tk.ID)[:8]
+	short := shortID(tk.ID)
 	for _, want := range []string{"[codex-luna]", "task " + short, "completed", "42 tests, all green"} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("line %q missing %q", line, want)
@@ -92,6 +93,45 @@ func TestRenderLineForTaskRequest(t *testing.T) {
 func TestRenderLinePassesChatThrough(t *testing.T) {
 	if _, ok := RenderLine("alice", "plain chat"); ok {
 		t.Fatal("RenderLine claimed a chat line")
+	}
+}
+
+// A multi-line result must stay ONE physical line: Sink.Deliver and
+// await both treat lines as message boundaries, so an embedded newline
+// would shatter one task into several bogus messages. (PR #13 review.)
+func TestRenderLineFlattensNewlines(t *testing.T) {
+	payload, _ := snapshotPayload(a2a.TaskStateCompleted, "line one\nline two\r\nline three")
+	line, ok := RenderLine("r", payload)
+	if !ok {
+		t.Fatal("rejected")
+	}
+	if strings.ContainsAny(line, "\n\r") {
+		t.Fatalf("rendered line contains raw line breaks: %q", line)
+	}
+	for _, want := range []string{"line one", "line two", "line three"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("content lost in flattening: %q", line)
+		}
+	}
+}
+
+// Truncation must cut at a rune boundary: a byte-index slice through a
+// multi-byte rune emits invalid UTF-8 into terminals and inbox files.
+// (PR #13 review.)
+func TestRenderLineTruncatesAtRuneBoundary(t *testing.T) {
+	// One ASCII byte then 2-byte runes, so a byte-index cut at any even
+	// offset lands mid-rune.
+	long := "x" + strings.Repeat("é", 300)
+	payload, _ := snapshotPayload(a2a.TaskStateCompleted, long)
+	line, ok := RenderLine("r", payload)
+	if !ok {
+		t.Fatal("rejected")
+	}
+	if !strings.Contains(line, "…") {
+		t.Fatalf("long result not truncated: %d bytes", len(line))
+	}
+	if !utf8.ValidString(line) {
+		t.Fatalf("truncation produced invalid UTF-8: %q", line)
 	}
 }
 

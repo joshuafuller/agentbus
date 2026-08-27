@@ -42,15 +42,55 @@ type Hub struct {
 // (task descriptions, results) while blocking abuse.
 const maxLineBytes = 256 * 1024
 
+// outboxDepth bounds how far behind a peer may fall before it is
+// dropped: enqueue is non-blocking, so a stalled reader costs the bus
+// nothing — it costs the stalled peer its seat.
+const outboxDepth = 256
+
 type peer struct {
 	name    string
-	oneshot bool // write-only sender: receives no relays
+	oneshot bool        // write-only sender: receives no relays
+	out     chan string // per-peer write queue; one writer goroutine drains it
 }
 
 // NewHub returns a hub for a host participating under name.
 // sink, if non-nil, receives every relayed message line (never notices).
 func NewHub(name string, sink func(line string)) *Hub {
 	return &Hub{name: name, sink: sink, peers: make(map[net.Conn]peer)}
+}
+
+// enqueue hands one line to a peer's writer without ever blocking the
+// hub: every write to a conn goes through its outbox and its single
+// writer goroutine, so a peer that stopped reading stalls only itself.
+// A full outbox means the peer is outboxDepth lines behind; its conn is
+// closed (its Serve then unregisters it) rather than letting it wedge
+// the bus — the review finding behind this design was one non-reading
+// peer freezing every participant for the write deadline (PR #9).
+// Callers hold h.mu, which makes enqueue order the wire order.
+func enqueue(conn net.Conn, p peer, line string) {
+	select {
+	case p.out <- line:
+	default:
+		conn.Close()
+	}
+}
+
+// writePeer is a peer's single writer: it drains the outbox in order.
+// On a write error it closes the conn (unblocking the peer's Serve,
+// which unregisters it and closes the outbox) and discards the rest.
+func writePeer(conn net.Conn, out <-chan string) {
+	defer conn.Close()
+	broken := false
+	for line := range out {
+		if broken {
+			continue
+		}
+		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if _, err := fmt.Fprintf(conn, "%s\n", line); err != nil {
+			broken = true
+			conn.Close()
+		}
+	}
 }
 
 // Serve owns conn: it reads the HELLO, registers the peer, relays its
@@ -70,16 +110,20 @@ func (h *Hub) Serve(conn net.Conn) {
 		return
 	}
 
+	out := make(chan string, outboxDepth)
+	go writePeer(conn, out)
+
 	h.mu.Lock()
 	// A rider's name is its identity: a new join under an existing name
 	// supersedes the old connection, so stale wiring (a dead session's
 	// leftover join) cannot cause duplicate deliveries. Oneshot senders
 	// neither displace nor count.
 	var stale net.Conn
+	var stalePeer peer
 	if !oneshot {
 		for c, p := range h.peers {
 			if p.name == name && !p.oneshot {
-				stale = c
+				stale, stalePeer = c, p
 				break
 			}
 		}
@@ -87,7 +131,8 @@ func (h *Hub) Serve(conn net.Conn) {
 			delete(h.peers, stale)
 		}
 	}
-	h.peers[conn] = peer{name: name, oneshot: oneshot}
+	me := peer{name: name, oneshot: oneshot, out: out}
+	h.peers[conn] = me
 	n := 1 // the host
 	for _, p := range h.peers {
 		if !p.oneshot {
@@ -95,24 +140,44 @@ func (h *Hub) Serve(conn net.Conn) {
 		}
 	}
 	// The welcome confirms registration: once a joiner reads it, the
-	// hub is guaranteed to relay to it. Written under the same lock
-	// that serializes every other write to this conn, so the welcome is
+	// hub is guaranteed to relay to it. Enqueued under the same lock
+	// that orders every other line to this conn, so the welcome is
 	// always the FIRST line a client reads — another peer's concurrent
 	// join notice cannot interleave ahead of it. Clients (send, task)
 	// rely on first-line-is-welcome.
-	writeLine(conn, Notice(fmt.Sprintf("welcome aboard, %s — %d on the bus", name, n)))
+	enqueue(conn, me, Notice(fmt.Sprintf("welcome aboard, %s — %d on the bus", name, n)))
+	// Catch-up before live traffic: lines spooled while this name was
+	// away flush now, oldest first, on this connection only. Under the
+	// same lock as registration and as deliver()'s absence-check+add,
+	// so the drain and the spool add are strictly ordered — a line goes
+	// to the live conn or to the spool this drain will read, never to a
+	// spool nobody drains — and no live line can interleave into the
+	// middle of the catch-up.
+	var drainErr error
+	if !oneshot && h.Spool != nil {
+		var lines []string
+		lines, drainErr = h.Spool.Drain(name)
+		for _, l := range lines {
+			enqueue(conn, me, l)
+		}
+	}
 	h.mu.Unlock()
+	if drainErr != nil {
+		h.notice(fmt.Sprintf("spool drain for %s failed: %v", name, drainErr), nil)
+	}
 	if stale != nil {
 		// Tell the displaced connection why it is going away. Without
 		// this its operator sees a bare EOF in the rider log, which is
 		// indistinguishable from a network drop — and a displacement is
 		// exactly the event an operator most needs to notice, because
 		// names are not authenticated (SECURITY.md T2) and the joiner
-		// may not be who the name implies. Best effort: the peer may
-		// already be gone, and writeLine's deadline bounds the wait.
-		writeLine(stale, Notice(fmt.Sprintf(
+		// may not be who the name implies. Best effort: its writer
+		// flushes what it can and closes. The stale peer is out of
+		// h.peers, so this goroutine is the only remaining sender and
+		// may close the outbox.
+		enqueue(stale, stalePeer, Notice(fmt.Sprintf(
 			"displaced — another connection joined as %s and took this name", name)))
-		stale.Close()
+		close(stalePeer.out)
 	}
 	if !oneshot {
 		if stale != nil {
@@ -130,32 +195,23 @@ func (h *Hub) Serve(conn net.Conn) {
 		}
 	}
 
-	// Catch-up before live traffic: lines spooled while this name was
-	// away flush now, oldest first, on this connection only.
-	if !oneshot && h.Spool != nil {
-		lines, err := h.Spool.Drain(name)
-		if err != nil {
-			h.notice(fmt.Sprintf("spool drain for %s failed: %v", name, err), nil)
-		}
-		for _, l := range lines {
-			writeLine(conn, l)
-		}
-	}
-
 	for sc.Scan() {
 		h.deliver(name, sc.Text(), conn)
 	}
 
 	h.mu.Lock()
 	// still is false when this conn was displaced by a later same-name
-	// join: that join already removed it from h.peers and announced the
-	// displacement, so suppressing the departure notice here avoids
+	// join: that join already removed it from h.peers (and owns closing
+	// its outbox), so suppressing the departure notice here avoids
 	// reporting a leave that would read as the *new* holder leaving.
 	_, still := h.peers[conn]
 	delete(h.peers, conn)
 	h.mu.Unlock()
-	if !oneshot && still {
-		h.notice(fmt.Sprintf("%s hopped off the bus", name), nil)
+	if still {
+		close(out) // the writer flushes and closes the conn
+		if !oneshot {
+			h.notice(fmt.Sprintf("%s hopped off the bus", name), nil)
+		}
 	}
 }
 
@@ -186,35 +242,44 @@ func (h *Hub) deliver(from, text string, via net.Conn) {
 	if to, payload, ok := ParseAddressed(text); ok {
 		line := Message(from, payload)
 		delivered := 0
+		var spoolNotice string
 		h.mu.Lock()
 		for conn, p := range h.peers {
 			if p.oneshot || p.name != to || conn == via {
 				continue
 			}
-			writeLine(conn, line)
+			enqueue(conn, p, line)
 			delivered++
 		}
-		h.mu.Unlock()
 		if to == h.name {
 			// The host is always present; its sink is its delivery.
 			delivered++
-			if h.sink != nil && from != h.name {
-				h.sink(line)
-			}
 		}
 		if delivered == 0 {
 			// Nobody holds that name. Spool for its return, or at least
 			// name the loss — a silent drop is the failure mode this
-			// project exists to kill (issue #8, ADR 0004).
+			// project exists to kill (issue #8, ADR 0004). The spool add
+			// happens under h.mu, the same lock a join's drain holds, so
+			// the absence check and the add are one atomic step: a line
+			// can never land in the spool after the drain that should
+			// have delivered it. Disk I/O under the hub lock is the
+			// price of that atomicity; entries are one small line each.
 			if h.Spool != nil {
 				if err := h.Spool.Add(to, line); err != nil {
-					h.notice(fmt.Sprintf("could not spool for %s: %v — line lost", to, err), nil)
+					spoolNotice = fmt.Sprintf("could not spool for %s: %v — line lost", to, err)
 				} else {
-					h.notice(fmt.Sprintf("%s is away — line spooled (%d pending)", to, h.Spool.Pending(to)), nil)
+					spoolNotice = fmt.Sprintf("%s is away — line spooled (%d pending)", to, h.Spool.Pending(to))
 				}
 			} else {
-				h.notice(fmt.Sprintf("nobody holds the name %s — line dropped (no spool)", to), nil)
+				spoolNotice = fmt.Sprintf("nobody holds the name %s — line dropped (no spool)", to)
 			}
+		}
+		h.mu.Unlock()
+		if delivered > 0 && to == h.name && h.sink != nil && from != h.name {
+			h.sink(line)
+		}
+		if spoolNotice != "" {
+			h.notice(spoolNotice, nil)
 		}
 		if h.TaskNotice != nil {
 			if n, ok := h.TaskNotice(from, to, payload); ok {
@@ -229,7 +294,7 @@ func (h *Hub) deliver(from, text string, via net.Conn) {
 		if p.oneshot || p.name == from || conn == via {
 			continue
 		}
-		writeLine(conn, line)
+		enqueue(conn, p, line)
 	}
 	h.mu.Unlock()
 	// The local sink is the host's own participation as the peer named
@@ -245,15 +310,6 @@ func (h *Hub) deliver(from, text string, via net.Conn) {
 	}
 }
 
-// writeLine writes one line with a short deadline so a stalled peer
-// cannot block the hub for everyone; a timed-out peer's connection
-// errors out and it drops off the bus on its own.
-func writeLine(conn net.Conn, line string) {
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	fmt.Fprintf(conn, "%s\n", line)
-	conn.SetWriteDeadline(time.Time{})
-}
-
 // notice sends a system notice to all peers except the excluded conn.
 // Notices are not delivered to the local sink, so they never wake an
 // agent.
@@ -262,11 +318,11 @@ func (h *Hub) notice(text string, except net.Conn) {
 	h.mu.Lock()
 	for conn, p := range h.peers {
 		// Oneshot senders get no notices: they may never read again,
-		// and a blocked write here would stall the whole hub.
+		// and their outbox would only fill toward a disconnect.
 		if p.oneshot || conn == except {
 			continue
 		}
-		writeLine(conn, line)
+		enqueue(conn, p, line)
 	}
 	h.mu.Unlock()
 	if h.OnNotice != nil {

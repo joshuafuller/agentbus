@@ -2,6 +2,8 @@ package task
 
 import (
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 )
@@ -78,9 +80,18 @@ func statusText(tk *a2a.Task) string {
 	return m.Parts[0].Text()
 }
 
+// truncate keeps rendered text one line and valid UTF-8: line breaks
+// collapse to a separator (Sink.Deliver and await treat lines as
+// message boundaries, so a raw newline would shatter one task into
+// several bogus messages) and the cut lands on a rune boundary.
 func truncate(s string, max int) string {
+	s = strings.NewReplacer("\r\n", " ⏎ ", "\n", " ⏎ ", "\r", " ⏎ ").Replace(s)
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
