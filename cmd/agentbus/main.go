@@ -260,13 +260,32 @@ func dial(ticket string) (net.Conn, error) {
 	return c.DialTCPPort(ctx, busPort)
 }
 
+// riderDir is a participant's home: conversation state, task store,
+// and identity key all live here, keyed by bus name.
+func riderDir(name string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".agentbus", "rider-"+name), nil
+}
+
 func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 	conn, err := dial(ticket)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	fmt.Fprintf(conn, "%s\n", bus.Hello(name))
+	// Every join is keyed (issue #6): the first join under a name binds
+	// it (TOFU) and every later connection must prove the same key.
+	rdir, err := riderDir(name)
+	if err != nil {
+		return err
+	}
+	key, err := bus.LoadOrCreateKey(rdir)
+	if err != nil {
+		return err
+	}
 
 	// The conn is written from stdin forwarding, and — when this join
 	// is a wired rider — from task goroutines reporting state. Guard it
@@ -299,6 +318,17 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 			Acked: func(id string) { sendLine(bus.Ack(id)) }}
 	}
 
+	sc := bufio.NewScanner(conn)
+	// The hub accepts lines up to 256KB; the default 64KB token limit
+	// would fail a legitimate large task line (PR #20 review). Must be
+	// set before the scanner's first Scan.
+	sc.Buffer(make([]byte, 0, 64*1024), 256*1024)
+	if err := bus.ClientHello(conn, sc, name, false, key); err != nil {
+		return err
+	}
+	// Stdin forwarding starts only AFTER the handshake: a buffered
+	// stdin line sent between HELLO and SIG would be read as handshake
+	// traffic and get the connection refused (PR #20 review, P1).
 	go func() {
 		sc := bufio.NewScanner(os.Stdin)
 		for sc.Scan() {
@@ -307,8 +337,6 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 			}
 		}
 	}()
-
-	sc := bufio.NewScanner(conn)
 	// At-least-once delivery: the hub redelivers unACKed envelopes, so
 	// remember recent ids and re-ACK duplicates without reprocessing.
 	seen := bus.NewDedup(1024)
@@ -334,18 +362,23 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 						continue
 					}
 				}
-				if seen.Seen(id) {
+				if seen.Has(id) {
 					sendLine(bus.Ack(id)) // duplicate chat: re-ACK, don't reprocess
 					continue
 				}
+				// Record the id only AFTER acceptance: marking first
+				// would turn a failed delivery's redelivery into an
+				// ACKed no-op — zero deliveries (PR #21 review).
 				plain := bus.Message(from, payload)
 				if rider != nil {
 					if sink.Deliver(plain) {
+						seen.Seen(id)
 						sendLine(bus.Ack(id)) // accepted: inbox append is synchronous
 					}
 					continue
 				}
 				if sink.Deliver(driverLine(plain)) {
+					seen.Seen(id)
 					sendLine(bus.Ack(id))
 				}
 				continue
@@ -404,13 +437,28 @@ func runSend(ticket, name, msg string) error {
 		return err
 	}
 	defer conn.Close()
-	fmt.Fprintf(conn, "%s\n", bus.HelloOneshot(name))
-
+	// Authenticate when we hold this name's key (an operator sending
+	// under their rider's name on the same host); a bound name refuses
+	// unkeyed sends outright (issue #6).
+	rdir, err := riderDir(name)
+	if err != nil {
+		return err
+	}
+	key, err := bus.LoadKeyIfExists(rdir)
+	if err != nil {
+		return err
+	}
+	sc := bufio.NewScanner(conn)
+	if err := bus.ClientHello(conn, sc, name, true, key); err != nil {
+		return err
+	}
 	// Wait for the welcome so we know the hub registered us before we
 	// send; otherwise the message could relay before registration.
-	sc := bufio.NewScanner(conn)
 	if !sc.Scan() {
 		return fmt.Errorf("bus closed the connection")
+	}
+	if !strings.Contains(sc.Text(), "welcome aboard") {
+		return fmt.Errorf("bus refused this connection: %s", sc.Text())
 	}
 	for _, line := range strings.Split(msg, "\n") {
 		if line = strings.TrimSpace(line); line != "" {

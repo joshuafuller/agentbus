@@ -36,3 +36,21 @@ func TestDedupEvictsOldestBeyondCapacity(t *testing.T) {
 		t.Fatal("recent id lost")
 	}
 }
+
+// Has must not mark: a receiver checks for duplicates BEFORE trying
+// delivery and records the id only after acceptance — marking on the
+// check would turn a failed delivery's redelivery into an ACKed
+// no-op (PR #21 review).
+func TestDedupHasDoesNotMark(t *testing.T) {
+	d := NewDedup(4)
+	if d.Has("a") {
+		t.Fatal("fresh id reported present")
+	}
+	if d.Has("a") {
+		t.Fatal("Has marked the id")
+	}
+	d.Seen("a")
+	if !d.Has("a") {
+		t.Fatal("recorded id not reported")
+	}
+}

@@ -28,6 +28,26 @@ HELLO <name> oneshot
   messages but receives no relays and no notices, never displaces a rider,
   and is not counted. The `send` command uses this.
 
+A greeting may carry the joiner's public key:
+
+```
+HELLO <name> [oneshot] key=<base64 ed25519 public key>
+```
+
+A keyed hello triggers the identity handshake (issue #6): the hub
+replies `CHAL <nonce>` and the joiner must answer `SIG <base64
+signature>` over the domain-separated transcript
+`"agentbus-join-v1" || nonce || name` — fresh per connection, so a
+captured signature cannot be replayed. The first RIDER to prove a key
+under a name **binds** it (trust on first use, for the life of the
+bus, announced on the feed); afterwards every connection under that
+name — one-shot senders included — must prove the same key or is
+refused with a visible notice. Names never claimed by a key keep
+working unkeyed. `join` always presents a key (created on first use at
+`~/.agentbus/rider-<name>/id_ed25519`, 0600); `send` and `task`
+present the name's key when the caller holds it. A rider that loses
+its key cannot reclaim its name until the bus restarts.
+
 The hub replies with a welcome notice; reading it confirms registration
 (so a sender can safely write immediately after):
 

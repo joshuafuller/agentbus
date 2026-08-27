@@ -186,7 +186,7 @@ func TestTaskRoundTripOverHub(t *testing.T) {
 	})
 
 	var out strings.Builder
-	code := runTaskConn(requesterConn(t, h), "alice", "worker", "ping", 5*time.Second, &out)
+	code := runTaskConn(requesterConn(t, h), "alice", "worker", "ping", 5*time.Second, nil, &out)
 	if code != 0 {
 		t.Fatalf("exit code %d, want 0; output:\n%s", code, out.String())
 	}
@@ -204,7 +204,7 @@ func TestTaskFailureExitsNonzero(t *testing.T) {
 	})
 
 	var out strings.Builder
-	code := runTaskConn(requesterConn(t, h), "alice", "worker", "x", 5*time.Second, &out)
+	code := runTaskConn(requesterConn(t, h), "alice", "worker", "x", 5*time.Second, nil, &out)
 	if code != 1 {
 		t.Fatalf("exit code %d, want 1; output:\n%s", code, out.String())
 	}
@@ -233,7 +233,7 @@ func TestTaskReportsStreamEndNotTimeout(t *testing.T) {
 	}()
 
 	var out strings.Builder
-	code := runTaskConn(client, "alice", "worker", "x", 5*time.Second, &out)
+	code := runTaskConn(client, "alice", "worker", "x", 5*time.Second, nil, &out)
 	if code != 2 {
 		t.Fatalf("exit %d, want 2; out=%q", code, out.String())
 	}
@@ -254,7 +254,7 @@ func TestTaskRoundTripOverSpooledHub(t *testing.T) {
 	})
 
 	var out strings.Builder
-	code := runTaskConn(requesterConn(t, h), "alice", "worker", "ping", 10*time.Second, &out)
+	code := runTaskConn(requesterConn(t, h), "alice", "worker", "ping", 10*time.Second, nil, &out)
 	if code != 0 {
 		t.Fatalf("exit code %d, want 0; output:\n%s", code, out.String())
 	}
@@ -285,7 +285,7 @@ func TestRunTaskConnClosesConnWhenDone(t *testing.T) {
 	startRider(t, h, "worker", nil) // deaf: runTaskConn returns on timeout
 
 	var out strings.Builder
-	runTaskConn(requesterConn(t, h), "alice", "worker", "x", 500*time.Millisecond, &out)
+	runTaskConn(requesterConn(t, h), "alice", "worker", "x", 500*time.Millisecond, nil, &out)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -315,7 +315,7 @@ func TestDeafRiderIsVisiblyDeaf(t *testing.T) {
 
 	var out strings.Builder
 	start := time.Now()
-	code := runTaskConn(requesterConn(t, h), "alice", "worker", "anyone home", 1*time.Second, &out)
+	code := runTaskConn(requesterConn(t, h), "alice", "worker", "anyone home", 1*time.Second, nil, &out)
 	if code != 2 {
 		t.Fatalf("exit code %d, want 2; output:\n%s", code, out.String())
 	}

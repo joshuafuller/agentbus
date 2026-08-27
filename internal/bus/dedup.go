@@ -20,6 +20,11 @@ func NewDedup(n int) *Dedup {
 	return &Dedup{seen: make(map[string]bool, n), cap: n}
 }
 
+// Has reports whether id was recorded, without recording it.
+func (d *Dedup) Has(id string) bool {
+	return d.seen[id]
+}
+
 // Seen records id and reports whether it was already present.
 func (d *Dedup) Seen(id string) bool {
 	if d.seen[id] {
