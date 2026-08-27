@@ -7,6 +7,16 @@ import (
 	"time"
 )
 
+// drainAll collects every line the spool will hand over.
+func drainAll(t *testing.T, s *FileSpool, rider string) []string {
+	t.Helper()
+	var lines []string
+	if _, _, err := s.Drain(rider, func(l string) bool { lines = append(lines, l); return true }); err != nil {
+		t.Fatal(err)
+	}
+	return lines
+}
+
 func TestSpoolAddDrainPreservesOrder(t *testing.T) {
 	s := NewFileSpool(t.TempDir(), time.Hour)
 	for _, l := range []string{"[a] first", "[b] second", "[a] third"} {
@@ -14,10 +24,7 @@ func TestSpoolAddDrainPreservesOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, err := s.Drain("codex-luna")
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := drainAll(t, s, "codex-luna")
 	want := []string{"[a] first", "[b] second", "[a] third"}
 	if len(got) != len(want) {
 		t.Fatalf("drained %v, want %v", got, want)
@@ -28,7 +35,7 @@ func TestSpoolAddDrainPreservesOrder(t *testing.T) {
 		}
 	}
 	// Drain consumes: a second drain is empty.
-	if again, _ := s.Drain("codex-luna"); len(again) != 0 {
+	if again := drainAll(t, s, "codex-luna"); len(again) != 0 {
 		t.Fatalf("second drain returned %v, want empty", again)
 	}
 }
@@ -37,11 +44,11 @@ func TestSpoolIsPerRider(t *testing.T) {
 	s := NewFileSpool(t.TempDir(), time.Hour)
 	s.Add("alpha", "[x] for alpha")
 	s.Add("beta", "[x] for beta")
-	got, _ := s.Drain("alpha")
+	got := drainAll(t, s, "alpha")
 	if len(got) != 1 || got[0] != "[x] for alpha" {
 		t.Fatalf("alpha drained %v", got)
 	}
-	if left, _ := s.Drain("beta"); len(left) != 1 {
+	if left := drainAll(t, s, "beta"); len(left) != 1 {
 		t.Fatalf("beta's spool disturbed: %v", left)
 	}
 }
@@ -49,10 +56,7 @@ func TestSpoolIsPerRider(t *testing.T) {
 func TestSpoolSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	NewFileSpool(dir, time.Hour).Add("r", "[x] persisted")
-	got, err := NewFileSpool(dir, time.Hour).Drain("r")
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := drainAll(t, NewFileSpool(dir, time.Hour), "r")
 	if len(got) != 1 || got[0] != "[x] persisted" {
 		t.Fatalf("after restart drained %v", got)
 	}
@@ -64,10 +68,7 @@ func TestSpoolExpiresOldEntriesAtDrain(t *testing.T) {
 	s.Add("r", "[x] stale")
 	time.Sleep(80 * time.Millisecond)
 	s.Add("r", "[x] fresh")
-	got, err := s.Drain("r")
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := drainAll(t, s, "r")
 	if len(got) != 1 || got[0] != "[x] fresh" {
 		t.Fatalf("drained %v, want only the fresh entry", got)
 	}
@@ -127,6 +128,24 @@ func TestSweepExpiredClearsAbandonedNames(t *testing.T) {
 	}
 	if n := s.Pending("live-rider"); n != 1 {
 		t.Fatalf("live-rider's fresh entry was swept (pending=%d)", n)
+	}
+}
+
+// A long-lived host must keep sweeping: startup-only enforcement lets
+// stale entries for never-returning names accumulate until the next
+// restart, which may be never. (PR #15 review.)
+func TestSweepEveryExpiresWhileRunning(t *testing.T) {
+	s := NewFileSpool(t.TempDir(), 40*time.Millisecond)
+	stop := s.SweepEvery(25 * time.Millisecond)
+	defer stop()
+
+	s.Add("abandoned", "[x] never collected")
+	deadline := time.Now().Add(2 * time.Second)
+	for s.Pending("abandoned") != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("entry outlived its TTL with the sweeper running (pending=%d)", s.Pending("abandoned"))
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

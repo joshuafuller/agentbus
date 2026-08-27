@@ -2,6 +2,7 @@ package bus
 
 import (
 	"bufio"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -343,6 +344,68 @@ func TestConcurrentSendAndJoinNeverStrandsALine(t *testing.T) {
 				break
 			}
 		}
+	}
+}
+
+// A rider returning to more catch-up than one outbox holds must lose
+// NOTHING: entries leave the spool only once accepted for delivery,
+// the overflow stays spooled, and the connection survives. (PR #15
+// review, P1: Drain deleted everything first, the outbox overflowed,
+// and the excess was gone forever.)
+func TestCatchUpBeyondOutboxLosesNothing(t *testing.T) {
+	h := NewHub("host", nil)
+	h.Spool = NewFileSpool(t.TempDir(), time.Hour)
+	total := outboxDepth + 200
+	for i := 0; i < total; i++ {
+		if err := h.Spool.Add("returning", fmt.Sprintf("[a] m%04d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, rLines := testPeer(t, h, "returning")
+
+	received := 0
+	timeout := time.After(5 * time.Second)
+collect:
+	for {
+		select {
+		case l, ok := <-rLines:
+			if !ok {
+				t.Fatalf("connection closed during catch-up after %d lines", received)
+			}
+			if !IsNotice(l) {
+				want := fmt.Sprintf("[a] m%04d", received)
+				if l != Message("a", fmt.Sprintf("m%04d", received)) {
+					t.Fatalf("line %d out of order: got %q want ...%q", received, l, want)
+				}
+				received++
+			}
+		case <-timeout:
+			t.Fatal("catch-up stalled")
+		}
+		if received+h.Spool.Pending("returning") == total && received > 0 {
+			// Drained all the outbox will take; the rest must still be
+			// on disk, not lost.
+			break collect
+		}
+	}
+	if received+h.Spool.Pending("returning") != total {
+		t.Fatalf("lost lines: received=%d pending=%d total=%d",
+			received, h.Spool.Pending("returning"), total)
+	}
+	if h.Spool.Pending("returning") == 0 {
+		t.Fatal("test did not exercise overflow — everything fit the outbox")
+	}
+	// The connection must still be live for future traffic.
+	names := h.Peers()
+	found := false
+	for _, n := range names {
+		if n == "returning" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("rider was disconnected by its own catch-up: peers=%v", names)
 	}
 }
 

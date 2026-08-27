@@ -111,11 +111,12 @@ named rider and follow its live lifecycle:
 $ agentbus task <ticket> <rider> "review the auth diff"
 ```
 
-The command follows `submitted → working → completed` or `failed`, prints the
-result, and exits `0` for completed or `1` for failed, rejected, or canceled.
-It exits `2` if no terminal state arrives within `--timeout` (10 minutes by
-default), including when the task is never acknowledged — making a deaf rider
-visible.
+The command follows `submitted → working` to a terminal state — `completed`,
+`failed`, `rejected`, or `canceled` — prints the result, and exits `0` for
+completed or `1` for any other terminal state the rider reported. It exits
+`2` when no terminal state was received: the `--timeout` expired (10 minutes
+by default), the task was never acknowledged — making a deaf rider visible —
+or the bus could not be reached at all.
 
 Every relayed task snapshot also appears in the driver's feed as:
 

@@ -28,7 +28,11 @@ func runTask(ticket, name, rider, prompt string, timeout time.Duration) error {
 	}
 	conn, err := dial(ticket)
 	if err != nil {
-		return err
+		// Exit 1 is reserved for a rider-reported terminal failure;
+		// a transport/setup error means NO terminal state was received,
+		// which is the exit-2 contract (PR #16 review).
+		fmt.Fprintf(os.Stderr, "agentbus: could not reach the bus: %v\n", err)
+		os.Exit(2)
 	}
 	code := runTaskConn(conn, name, rider, prompt, timeout, os.Stdout)
 	os.Exit(code)

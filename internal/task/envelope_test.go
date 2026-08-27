@@ -159,6 +159,42 @@ func TestRiderSerializesTaskExecution(t *testing.T) {
 	}
 }
 
+// A full task queue must refuse visibly: the requester gets a terminal
+// REJECTED snapshot immediately instead of waiting out its timeout on
+// a task the rider silently discarded. (PR #15 review.)
+func TestRiderRejectsWhenQueueFull(t *testing.T) {
+	block := make(chan struct{})
+	sent := make(chan string, 256)
+	r := &Rider{
+		Dir:    t.TempDir(),
+		Runner: func(string) (string, error) { <-block; return "ok", nil },
+		Send:   func(line string) { sent <- line },
+	}
+	defer close(block)
+
+	// One running + fill the queue, then one more.
+	for i := 0; i < taskQueueDepth+2; i++ {
+		msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("t"))
+		r.Handle("alice", EncodeMessage(msg))
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case line := <-sent:
+			_, payload, _ := bus.ParseAddressed(line)
+			if tk, ok := DecodeTask(payload); ok && tk.Status.State == a2a.TaskStateRejected {
+				if txt := tk.Status.Message.Parts[0].Text(); !strings.Contains(txt, "queue") {
+					t.Fatalf("rejection does not name the cause: %q", txt)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("no REJECTED snapshot for the overflow task")
+		}
+	}
+}
+
 func TestRiderIgnoresChatLines(t *testing.T) {
 	r := &Rider{Dir: t.TempDir(), Runner: nil, Send: func(string) { t.Fatal("sent") }}
 	if r.Handle("alice", "just chatting") {

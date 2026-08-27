@@ -47,6 +47,11 @@ const maxLineBytes = 256 * 1024
 // nothing — it costs the stalled peer its seat.
 const outboxDepth = 256
 
+// catchUpHeadroom is outbox capacity a spool drain leaves free for
+// live traffic, so a large catch-up cannot push its own rider over the
+// slow-consumer drop threshold.
+const catchUpHeadroom = 64
+
 type peer struct {
 	name    string
 	oneshot bool        // write-only sender: receives no relays
@@ -153,17 +158,32 @@ func (h *Hub) Serve(conn net.Conn) {
 	// to the live conn or to the spool this drain will read, never to a
 	// spool nobody drains — and no live line can interleave into the
 	// middle of the catch-up.
+	// Catch-up may exceed one outbox: accept only while headroom
+	// remains (so live traffic enqueued after the drain cannot push the
+	// peer over the drop threshold), and let Drain keep the remainder
+	// on disk — it removes an entry only after we take it, so a drain
+	// that outruns the outbox loses nothing.
+	var drained, left int
 	var drainErr error
 	if !oneshot && h.Spool != nil {
-		var lines []string
-		lines, drainErr = h.Spool.Drain(name)
-		for _, l := range lines {
-			enqueue(conn, me, l)
-		}
+		drained, left, drainErr = h.Spool.Drain(name, func(l string) bool {
+			if len(me.out) >= outboxDepth-catchUpHeadroom {
+				return false
+			}
+			select {
+			case me.out <- l:
+				return true
+			default:
+				return false
+			}
+		})
 	}
 	h.mu.Unlock()
 	if drainErr != nil {
 		h.notice(fmt.Sprintf("spool drain for %s failed: %v", name, drainErr), nil)
+	}
+	if left > 0 {
+		h.notice(fmt.Sprintf("%s caught up %d spooled lines — %d still pending, rejoin to collect the rest", name, drained, left), nil)
 	}
 	if stale != nil {
 		// Tell the displaced connection why it is going away. Without
