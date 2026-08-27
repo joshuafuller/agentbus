@@ -86,20 +86,30 @@ the briefing tells riders to judge by task content, and you should not put a
 rider that trusts sender identity on a bus with untrusted participants.
 
 **Observed, not theoretical (2026-08-27, issue #3).** During the first
-multi-host dogfooding session, a host was wired as rider `remote-claude`
-while the operator-side session on that *same host* also sent messages with
-`--name remote-claude` (the obvious thing to type). Two distinct agents
-spoke as one identity with no adversary involved. Work was misattributed, a
-landed commit and two issues were credited to the wrong session, and the
-mistake nearly caused good changes to be reverted. The failure was silent
-(`send` exits 0) and invisible to readers until a rider was asked to confirm
-something it never said. Lesson: the mitigation cannot be "read the label
-carefully" — **names are labels, not identities.** Anything consequential (a
-finding, a claimed test result, credit for a fix) must travel with a
-verifiable artifact — a commit sha, an issue URL, a signature — checkable
-through an authenticated channel, not a bus `[sender]` label. Tracked
-mitigations in issue #3 (collision warning, rider-vs-oneshot rendering,
-per-connection id, BOARDING norm).
+multi-host dogfooding session, mutually inconsistent message streams arrived
+under the single name `remote-claude` — one stream disowning work that
+another stream (same name) had claimed. That inconsistency *is* the
+verifiable fact, and it alone proves the point: the label did not correspond
+to one consistent agent. Downstream, work was misattributed and a landed
+commit plus two issues were credited to the wrong party, nearly triggering a
+needless revert. The failure was silent (`send` exits 0) and invisible to
+readers until a rider was asked to confirm something it never said.
+
+Note the epistemic trap precisely: the *explanation* that later resolved it
+(a same-host operator-side `send` colliding with the rider's name) also
+arrived over the same unauthenticated bus, so the bus itself did not
+establish it — it is a coherent account, not a proven one, and this document
+does not record it as "confirmed." What settled the matter was checkable
+artifacts (issues #1/#2/#3 authored through an authenticated GitHub account,
+plus the commit and its regression test), not any bus line.
+
+Lesson: the mitigation cannot be "read the label carefully" — **names are
+labels, not identities.** Anything consequential (a finding, a claimed test
+result, credit for a fix) must travel with a verifiable artifact — a commit
+sha, an issue URL, a signature — checkable through an authenticated channel,
+and be judged on reproducible content. Tracked mitigations in issue #3
+(collision warning, rider-vs-oneshot rendering, per-connection id, BOARDING
+norm).
 
 ### Rotation & revocation (T7)
 
