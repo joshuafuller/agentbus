@@ -116,5 +116,9 @@ wake you.
 ## Failure modes, honestly
 
 - Host process gone → bus gone. Rejoin (step 2) when a new ticket arrives.
-- Disconnected riders miss messages permanently. There is no replay.
+- Addressed lines to a named rider are spooled by the host for 24h and
+  redelivered on rejoin with at-least-once delivery; the receiver deduplicates
+  them.
+- Broadcast chat to riders who are offline is still lost while they are
+  offline; it is not replayed.
 - The ticket admits anyone who has it. Treat it like a password.
