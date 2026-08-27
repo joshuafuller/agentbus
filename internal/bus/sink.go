@@ -46,8 +46,14 @@ func (s *Sink) Start() {
 	}()
 }
 
-// Deliver handles one received message line.
-func (s *Sink) Deliver(line string) {
+// Deliver handles one received message line and reports whether every
+// configured output ACCEPTED it: a failed inbox append or a full
+// on-msg queue returns false so the caller can withhold the envelope
+// ACK and let the hub redeliver — an unconditional ACK there would
+// turn overload or a disk error into silent permanent loss (PR #18
+// review).
+func (s *Sink) Deliver(line string) bool {
+	ok := true
 	if s.Out != nil {
 		fmt.Fprintln(s.Out, line)
 	}
@@ -56,8 +62,11 @@ func (s *Sink) Deliver(line string) {
 		f, err := os.OpenFile(s.Inbox, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "agentbus: inbox: %v\n", err)
+			ok = false
 		} else {
-			fmt.Fprintln(f, line)
+			if _, err := fmt.Fprintln(f, line); err != nil {
+				ok = false
+			}
 			f.Close()
 		}
 	}
@@ -66,6 +75,8 @@ func (s *Sink) Deliver(line string) {
 		case s.queue <- line:
 		default:
 			fmt.Fprintln(os.Stderr, "agentbus: on-msg queue full, dropping")
+			ok = false
 		}
 	}
+	return ok
 }

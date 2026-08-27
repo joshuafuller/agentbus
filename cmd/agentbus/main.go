@@ -195,9 +195,11 @@ func runHost(name, onMsg string, sink *bus.Sink) error {
 			return err
 		}
 		hostRider = &task.Rider{Dir: dir, Runner: execRunner(onMsg),
-			Send: func(line string) { hub.Broadcast(line) }}
+			Send:  func(line string) { hub.Broadcast(line) },
+			Acked: func(id string) { hub.AckLocal(id) }}
 	}
-	hub = bus.NewHub(name, hostSink(hostRider, sink.Deliver))
+	hub = bus.NewHub(name, hostSink(hostRider, sink.Deliver,
+		func(id string) { hub.AckLocal(id) }, bus.NewDedup(1024)))
 	hub.OnNotice = func(line string) { fmt.Println(line) }
 	// Task lifecycle transitions become feed notices every driver sees
 	// (issue #12). Injected here because bus cannot import task.
@@ -214,6 +216,9 @@ func runHost(name, onMsg string, sink *bus.Sink) error {
 			fmt.Fprintf(os.Stderr, "agentbus: spool sweep: %v\n", err)
 		})()
 		hub.Spool = spool
+		// The host's own catch-up: redeliver unacked host-addressed
+		// entries from before the restart.
+		hub.DrainLocal()
 	} else {
 		fmt.Fprintf(os.Stderr, "agentbus: no home dir (%v) — offline spool disabled\n", err)
 	}
@@ -288,7 +293,10 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		rider = &task.Rider{Dir: dir, Runner: execRunner(onMsg), Send: sendLine}
+		rider = &task.Rider{Dir: dir, Runner: execRunner(onMsg), Send: sendLine,
+			// ACK a task envelope only once its SUBMITTED snapshot is
+			// on disk — the hub then forgets its spooled copy.
+			Acked: func(id string) { sendLine(bus.Ack(id)) }}
 	}
 
 	go func() {
@@ -301,19 +309,52 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 	}()
 
 	sc := bufio.NewScanner(conn)
+	// At-least-once delivery: the hub redelivers unACKed envelopes, so
+	// remember recent ids and re-ACK duplicates without reprocessing.
+	seen := bus.NewDedup(1024)
 	for sc.Scan() {
 		line := sc.Text()
 		if bus.IsNotice(line) {
 			fmt.Println(line) // visible to humans, never delivered to agents
 			continue
 		}
+		from, body, isMsg := bus.ParseMessage(line)
+		if isMsg {
+			if id, payload, isEnv := bus.ParseEnvelope(body); isEnv {
+				if rider != nil {
+					if _, isTask := task.DecodeMessage(payload); isTask {
+						// Task envelopes bypass the join-level dedup
+						// entirely: the Rider owns task dedup with its
+						// DURABLE accepted-set, and ACKs only after the
+						// SUBMITTED persist. A join-level seen-mark here
+						// would re-ACK a redelivery while the task is
+						// still queued unpersisted — the hub would then
+						// forget its only durable copy (PR #18 review).
+						rider.HandleEnveloped(from, id, payload)
+						continue
+					}
+				}
+				if seen.Seen(id) {
+					sendLine(bus.Ack(id)) // duplicate chat: re-ACK, don't reprocess
+					continue
+				}
+				plain := bus.Message(from, payload)
+				if rider != nil {
+					if sink.Deliver(plain) {
+						sendLine(bus.Ack(id)) // accepted: inbox append is synchronous
+					}
+					continue
+				}
+				if sink.Deliver(driverLine(plain)) {
+					sendLine(bus.Ack(id))
+				}
+				continue
+			}
+		}
 		if rider != nil {
-			if from, payload, ok := bus.ParseMessage(line); ok {
-				if _, isTask := task.DecodeMessage(payload); isTask {
-					// Handle enqueues and returns; the rider's worker runs
-					// tasks strictly one at a time so concurrent turns never
-					// race the persisted model conversation.
-					rider.Handle(from, payload)
+			if isMsg {
+				if _, isTask := task.DecodeMessage(body); isTask {
+					rider.Handle(from, body)
 					continue
 				}
 			}

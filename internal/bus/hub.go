@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"time"
 )
@@ -12,8 +13,8 @@ import (
 // other peer (by name, so a peer's send and receive connections under
 // the same name never echo back) and to the local sink.
 type Hub struct {
-	name string            // the host's own participant name
-	sink func(line string) // local delivery of message lines; may be nil
+	name string                 // the host's own participant name
+	sink func(line string) bool // local delivery; reports acceptance; may be nil
 
 	// OnNotice, if non-nil, receives system notice lines (joins and
 	// leaves) for local display. Kept separate from sink so notices are
@@ -25,6 +26,10 @@ type Hub struct {
 	// (Gate 3, issue #7). Without a spool such lines are lost — either
 	// way the hub says so on the feed rather than staying silent.
 	Spool Spooler
+
+	// RetryInterval is how long an offered envelope may go unACKed
+	// before the pump redelivers it. Zero means the 5s default.
+	RetryInterval time.Duration
 
 	// TaskNotice, if non-nil, inspects each addressed payload the hub
 	// relays and may return a feed notice describing it — how task
@@ -54,13 +59,15 @@ const catchUpHeadroom = 64
 
 type peer struct {
 	name    string
-	oneshot bool        // write-only sender: receives no relays
-	out     chan string // per-peer write queue; one writer goroutine drains it
+	oneshot bool          // write-only sender: receives no relays
+	out     chan string   // per-peer write queue; one writer goroutine drains it
+	kick    chan struct{} // wakes the pump when a new addressed line spools
+	acks    chan string   // envelope ids the peer has acknowledged
 }
 
 // NewHub returns a hub for a host participating under name.
 // sink, if non-nil, receives every relayed message line (never notices).
-func NewHub(name string, sink func(line string)) *Hub {
+func NewHub(name string, sink func(line string) bool) *Hub {
 	return &Hub{name: name, sink: sink, peers: make(map[net.Conn]peer)}
 }
 
@@ -136,7 +143,8 @@ func (h *Hub) Serve(conn net.Conn) {
 			delete(h.peers, stale)
 		}
 	}
-	me := peer{name: name, oneshot: oneshot, out: out}
+	me := peer{name: name, oneshot: oneshot, out: out,
+		kick: make(chan struct{}, 1), acks: make(chan string, outboxDepth)}
 	h.peers[conn] = me
 	n := 1 // the host
 	for _, p := range h.peers {
@@ -151,31 +159,14 @@ func (h *Hub) Serve(conn net.Conn) {
 	// join notice cannot interleave ahead of it. Clients (send, task)
 	// rely on first-line-is-welcome.
 	enqueue(conn, me, Notice(fmt.Sprintf("welcome aboard, %s — %d on the bus", name, n)))
-	// Catch-up before live traffic: lines spooled while this name was
-	// away flush now, oldest first, on this connection only. Under the
-	// same lock as registration and as deliver()'s absence-check+add,
-	// so the drain and the spool add are strictly ordered — a line goes
-	// to the live conn or to the spool this drain will read, never to a
-	// spool nobody drains — and no live line can interleave into the
-	// middle of the catch-up.
-	// Catch-up may exceed one outbox: the first pass runs here (under
-	// the registration lock, so backlog strictly precedes live lines);
-	// any remainder is fed by a background loop as the writer frees
-	// capacity — a rider must never need to reconnect to collect its
-	// own backlog. Drain removes an entry only after we take it, so a
-	// pass that outruns the outbox loses nothing.
-	var left int
-	var drainErr error
-	if !oneshot && h.Spool != nil {
-		_, left, drainErr = h.Spool.Drain(name, drainAccept(me))
-	}
 	h.mu.Unlock()
-	if drainErr != nil {
-		h.notice(fmt.Sprintf("spool drain for %s failed: %v", name, drainErr), nil)
-	}
-	if left > 0 {
-		h.notice(fmt.Sprintf("%s is catching up — %d spooled lines still queued", name, left), nil)
-		go h.catchUp(conn, me, name)
+	// Delivery for this peer — backlog catch-up AND live addressed
+	// lines — is one mechanism: the pump. Everything addressed goes
+	// through the spool; the pump offers entries oldest-first as
+	// envelopes and the spool forgets an entry only when the rider's
+	// ACK arrives (issue #7, ADR 0004).
+	if !oneshot && h.Spool != nil {
+		go h.pump(conn, me, name)
 	}
 	if stale != nil {
 		// Tell the displaced connection why it is going away. Without
@@ -208,7 +199,17 @@ func (h *Hub) Serve(conn net.Conn) {
 	}
 
 	for sc.Scan() {
-		h.deliver(name, sc.Text(), conn)
+		line := sc.Text()
+		// ACKs are control traffic between this peer and its pump —
+		// consumed here, never relayed.
+		if id, ok := ParseAck(line); ok {
+			select {
+			case me.acks <- id:
+			default: // pump far behind; the retry path re-converges
+			}
+			continue
+		}
+		h.deliver(name, line, conn)
 	}
 
 	h.mu.Lock()
@@ -227,50 +228,114 @@ func (h *Hub) Serve(conn net.Conn) {
 	}
 }
 
-// drainAccept bounds one drain pass: at most a headroom's worth of
-// lines per pass and never past the outbox threshold, so the work done
-// under h.mu is bounded regardless of how fast the writer drains
-// (PR #17 review) and live traffic can never push the peer over the
-// slow-consumer drop limit.
-func drainAccept(me peer) func(string) bool {
-	accepted := 0
-	return func(l string) bool {
-		if accepted >= outboxDepth-catchUpHeadroom || len(me.out) >= outboxDepth-catchUpHeadroom {
-			return false
+// pump is a rider's delivery loop: it lives as long as the peer does,
+// offering spooled entries oldest-first as envelopes, redelivering
+// what goes unACKed past RetryInterval, and removing an entry only
+// when the rider's ACK arrives. Each pass is bounded (a headroom's
+// worth of sends, never past the outbox threshold) and its Offer pass
+// runs under h.mu, which serializes SENDING with registration and
+// removal — the pump can only send while its peer is registered, so it
+// never writes to a closed outbox. ACK-driven Removes run outside the
+// lock: FileSpool operations are safe concurrently, and only this
+// goroutine removes for this name. Between passes it sleeps until kicked by a new
+// Add, an ACK, or the retry half-interval.
+func (h *Hub) pump(conn net.Conn, me peer, name string) {
+	inflight := map[string]time.Time{}
+	retry := h.RetryInterval
+	if retry <= 0 {
+		retry = 5 * time.Second
+	}
+	for {
+		// Absorb pending ACKs first: forget the entry durably.
+		for {
+			select {
+			case id := <-me.acks:
+				if err := h.Spool.Remove(name, id); err != nil && !os.IsNotExist(err) {
+					h.notice(fmt.Sprintf("could not clear acked entry %s for %s: %v", id, name, err), nil)
+				}
+				delete(inflight, id)
+				continue
+			default:
+			}
+			break
 		}
+
+		h.mu.Lock()
+		if _, alive := h.peers[conn]; !alive {
+			h.mu.Unlock()
+			return
+		}
+		now := time.Now()
+		sent := 0
+		err := h.Spool.Offer(name, func(id, line string) bool {
+			if sent >= outboxDepth-catchUpHeadroom || len(me.out) >= outboxDepth-catchUpHeadroom {
+				return false
+			}
+			if dl, in := inflight[id]; in && now.Before(dl) {
+				return true // in flight and not yet due for retry: skip
+			}
+			from, payload, ok := ParseMessage(line)
+			if !ok {
+				// Not a message line: unrecoverable garbage; drop it,
+				// and its inflight record with it.
+				h.Spool.Remove(name, id)
+				delete(inflight, id)
+				return true
+			}
+			select {
+			case me.out <- Message(from, Envelope(id, payload)):
+				inflight[id] = now.Add(retry)
+				sent++
+				return true
+			default:
+				return false
+			}
+		})
+		h.mu.Unlock()
+		if err != nil {
+			h.notice(fmt.Sprintf("spool offer for %s failed: %v", name, err), nil)
+		}
+
 		select {
-		case me.out <- l:
-			accepted++
-			return true
-		default:
-			return false
+		case <-me.kick:
+		case id := <-me.acks:
+			if err := h.Spool.Remove(name, id); err != nil && !os.IsNotExist(err) {
+				h.notice(fmt.Sprintf("could not clear acked entry %s for %s: %v", id, name, err), nil)
+			}
+			delete(inflight, id)
+		case <-time.After(retry / 2):
 		}
 	}
 }
 
-// catchUp keeps feeding a rider's remaining backlog as its writer
-// frees outbox capacity, until the spool is empty or the peer leaves.
-// Each pass holds h.mu only for one bounded drain, and deliver()
-// routes new addressed lines for this name into the spool while a
-// backlog exists, so old-before-new ordering holds throughout.
-func (h *Hub) catchUp(conn net.Conn, me peer, name string) {
-	for {
-		h.mu.Lock()
-		if _, ok := h.peers[conn]; !ok {
-			h.mu.Unlock()
-			return
+// AckLocal acknowledges a host-addressed envelope: the host durably
+// accepted it, so the spool may forget it.
+func (h *Hub) AckLocal(id string) {
+	if h.Spool == nil {
+		return
+	}
+	if err := h.Spool.Remove(h.name, id); err != nil && !os.IsNotExist(err) {
+		h.notice(fmt.Sprintf("could not clear host entry %s: %v", id, err), nil)
+	}
+}
+
+// DrainLocal re-offers unacked host-addressed entries to the sink,
+// oldest first — the host's catch-up after a restart. Stops at the
+// first refusal.
+func (h *Hub) DrainLocal() {
+	if h.Spool == nil || h.sink == nil {
+		return
+	}
+	err := h.Spool.Offer(h.name, func(id, line string) bool {
+		from, payload, ok := ParseMessage(line)
+		if !ok {
+			h.Spool.Remove(h.name, id) // garbage entry
+			return true
 		}
-		_, left, err := h.Spool.Drain(name, drainAccept(me))
-		h.mu.Unlock()
-		if err != nil {
-			h.notice(fmt.Sprintf("spool drain for %s failed: %v", name, err), nil)
-			return
-		}
-		if left == 0 {
-			h.notice(fmt.Sprintf("%s is caught up", name), nil)
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
+		return h.sink(Message(from, Envelope(id, payload)))
+	})
+	if err != nil {
+		h.notice(fmt.Sprintf("host spool drain failed: %v", err), nil)
 	}
 }
 
@@ -300,54 +365,72 @@ func (h *Hub) Peers() []string {
 func (h *Hub) deliver(from, text string, via net.Conn) {
 	if to, payload, ok := ParseAddressed(text); ok {
 		line := Message(from, payload)
-		delivered := 0
 		var spoolNotice string
+		toHost := to == h.name
 		h.mu.Lock()
-		// While a backlog exists for this name, live lines join the END
-		// of the spool instead of the outbox: older spooled lines must
-		// execute before newer live ones (PR #17 review). The catch-up
-		// loop will deliver them in order.
-		backlog := h.Spool != nil && to != h.name && h.Spool.Pending(to) > 0
-		for conn, p := range h.peers {
-			if backlog || p.oneshot || p.name != to || conn == via {
-				continue
+		var hostEnvelope string
+		switch {
+		case toHost && h.Spool != nil:
+			// The host gets the same durable-first contract as remote
+			// riders (PR #18 review): spool, deliver enveloped, forget
+			// only on AckLocal. (Sink call after unlock.)
+			id, err := h.Spool.Add(to, line)
+			if err != nil {
+				spoolNotice = fmt.Sprintf("could not spool for %s: %v — line lost", to, err)
+				break
 			}
-			enqueue(conn, p, line)
-			delivered++
-		}
-		if to == h.name {
-			// The host is always present; its sink is its delivery.
-			delivered++
-		}
-		if delivered == 0 && backlog {
-			// Not absence — ordering: the line joins the back of the
-			// queue the catch-up loop is already delivering. No notice
-			// per line; the catching-up/caught-up notices bracket it.
-			if err := h.Spool.Add(to, line); err != nil {
-				spoolNotice = fmt.Sprintf("could not queue for %s: %v — line lost", to, err)
+			hostEnvelope = Message(from, Envelope(id, payload))
+		case toHost:
+			// Legacy no-spool hub: direct sink delivery.
+		case h.Spool != nil:
+			// Durable first, always: every addressed line lands in the
+			// spool, the target's pump delivers it as an envelope, and
+			// the entry survives until the rider's ACK (issue #7,
+			// ADR 0004). Ordering falls out: the spool is the single
+			// queue, oldest first. Disk I/O under h.mu is the price of
+			// making the add atomic with join/leave; one small line each.
+			if _, err := h.Spool.Add(to, line); err != nil {
+				spoolNotice = fmt.Sprintf("could not spool for %s: %v — line lost", to, err)
+				break
 			}
-		} else if delivered == 0 {
-			// Nobody holds that name. Spool for its return, or at least
-			// name the loss — a silent drop is the failure mode this
-			// project exists to kill (issue #8, ADR 0004). The spool add
-			// happens under h.mu, the same lock a join's drain holds, so
-			// the absence check and the add are one atomic step: a line
-			// can never land in the spool after the drain that should
-			// have delivered it. Disk I/O under the hub lock is the
-			// price of that atomicity; entries are one small line each.
-			if h.Spool != nil {
-				if err := h.Spool.Add(to, line); err != nil {
-					spoolNotice = fmt.Sprintf("could not spool for %s: %v — line lost", to, err)
-				} else {
-					spoolNotice = fmt.Sprintf("%s is away — line spooled (%d pending)", to, h.Spool.Pending(to))
+			present := false
+			for conn, p := range h.peers {
+				if !p.oneshot && p.name == to && conn != via {
+					present = true
+					select {
+					case p.kick <- struct{}{}:
+					default: // pump already awake
+					}
 				}
-			} else {
+			}
+			if !present {
+				spoolNotice = fmt.Sprintf("%s is away — line spooled (%d pending)", to, h.Spool.Pending(to))
+			}
+		default:
+			// Legacy no-spool hub: best-effort direct delivery, loudly
+			// lossy when nobody holds the name.
+			delivered := 0
+			for conn, p := range h.peers {
+				if p.oneshot || p.name != to || conn == via {
+					continue
+				}
+				enqueue(conn, p, line)
+				delivered++
+			}
+			if delivered == 0 {
 				spoolNotice = fmt.Sprintf("nobody holds the name %s — line dropped (no spool)", to)
 			}
 		}
 		h.mu.Unlock()
-		if delivered > 0 && to == h.name && h.sink != nil && from != h.name {
-			h.sink(line)
+		if toHost && h.sink != nil && from != h.name {
+			if hostEnvelope != "" {
+				// Acceptance is signalled via AckLocal (after the host
+				// durably has it); a refusal leaves the entry for
+				// DrainLocal on the next start.
+				h.sink(hostEnvelope)
+			} else {
+				h.sink(line)
+			}
 		}
 		if spoolNotice != "" {
 			h.notice(spoolNotice, nil)

@@ -90,6 +90,48 @@ func ParseAddressed(line string) (to, payload string, ok bool) {
 	return to, payload, true
 }
 
+// Envelope wraps an addressed payload for at-least-once delivery: the
+// id is the hub's spool entry id, and the receiver ACKs it back once
+// the payload is durably accepted. The hub keeps the entry (and
+// redelivers) until then.
+func Envelope(id, payload string) string {
+	return "E:" + id + " " + payload
+}
+
+// ParseEnvelope splits an enveloped payload body into id and payload.
+func ParseEnvelope(body string) (id, payload string, ok bool) {
+	rest, found := strings.CutPrefix(body, "E:")
+	if !found {
+		return "", "", false
+	}
+	id, payload, found = strings.Cut(rest, " ")
+	if !found || id == "" || payload == "" {
+		return "", "", false
+	}
+	return id, payload, true
+}
+
+// Ack formats a receiver's acknowledgement of one envelope (client →
+// hub, consumed by the hub, never relayed).
+func Ack(id string) string {
+	return "ACKD " + id
+}
+
+// ParseAck extracts the envelope id from an acknowledgement line.
+func ParseAck(line string) (id string, ok bool) {
+	rest, found := strings.CutPrefix(line, "ACKD ")
+	if !found {
+		return "", false
+	}
+	id = strings.TrimSpace(rest)
+	// One token only: a multi-token "id" can never match a spool entry
+	// and would loop through futile removes and redeliveries.
+	if id == "" || strings.ContainsAny(id, " \t") {
+		return "", false
+	}
+	return id, true
+}
+
 // Notice formats a system notice line (without newline).
 func Notice(text string) string {
 	return "* " + text

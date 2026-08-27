@@ -1,18 +1,26 @@
 package bus
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-// drainAll collects every line the spool will hand over.
+// drainAll collects and acknowledges every line the spool will hand
+// over — the Offer+Remove cycle a healthy receiver performs.
 func drainAll(t *testing.T, s *FileSpool, rider string) []string {
 	t.Helper()
 	var lines []string
-	if _, _, err := s.Drain(rider, func(l string) bool { lines = append(lines, l); return true }); err != nil {
+	var ids []string
+	if err := s.Offer(rider, func(id, l string) bool { ids = append(ids, id); lines = append(lines, l); return true }); err != nil {
 		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if err := s.Remove(rider, id); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return lines
 }
@@ -20,7 +28,7 @@ func drainAll(t *testing.T, s *FileSpool, rider string) []string {
 func TestSpoolAddDrainPreservesOrder(t *testing.T) {
 	s := NewFileSpool(t.TempDir(), time.Hour)
 	for _, l := range []string{"[a] first", "[b] second", "[a] third"} {
-		if err := s.Add("codex-luna", l); err != nil {
+		if _, err := s.Add("codex-luna", l); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -62,11 +70,24 @@ func TestSpoolSurvivesRestart(t *testing.T) {
 	}
 }
 
+// addAged plants a spool entry stamped age in the past — expiry tests
+// must not depend on real sleeps racing a TTL on a slow CI runner.
+func addAged(t *testing.T, dir, rider, line string, age time.Duration) {
+	t.Helper()
+	rdir := filepath.Join(dir, rider)
+	if err := os.MkdirAll(rdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("%019d-%06d.line", time.Now().Add(-age).UnixNano(), 1)
+	if err := os.WriteFile(filepath.Join(rdir, name), []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSpoolExpiresOldEntriesAtDrain(t *testing.T) {
 	dir := t.TempDir()
-	s := NewFileSpool(dir, 50*time.Millisecond)
-	s.Add("r", "[x] stale")
-	time.Sleep(80 * time.Millisecond)
+	s := NewFileSpool(dir, time.Hour)
+	addAged(t, dir, "r", "[x] stale", 2*time.Hour)
 	s.Add("r", "[x] fresh")
 	got := drainAll(t, s, "r")
 	if len(got) != 1 || got[0] != "[x] fresh" {
@@ -77,7 +98,7 @@ func TestSpoolExpiresOldEntriesAtDrain(t *testing.T) {
 func TestSpoolFilesArePrivate(t *testing.T) {
 	dir := t.TempDir()
 	s := NewFileSpool(dir, time.Hour)
-	if err := s.Add("r", "[x] secret task"); err != nil {
+	if _, err := s.Add("r", "[x] secret task"); err != nil {
 		t.Fatal(err)
 	}
 	riderDir := filepath.Join(dir, "r")
@@ -100,8 +121,63 @@ func TestSpoolFilesArePrivate(t *testing.T) {
 
 func TestSpoolRejectsUnsafeRiderName(t *testing.T) {
 	s := NewFileSpool(t.TempDir(), time.Hour)
-	if err := s.Add("../evil", "[x] escape"); err == nil {
+	if _, err := s.Add("../evil", "[x] escape"); err == nil {
 		t.Fatal("Add accepted a path-traversal rider name")
+	}
+}
+
+// The ACK contract (issue #7, ADR 0004): an offered entry stays on
+// disk until Remove — delivery to a connection is an attempt, not
+// delivery. Offer exposes stable per-entry ids for the ACK round trip.
+func TestOfferKeepsEntriesUntilRemoved(t *testing.T) {
+	s := NewFileSpool(t.TempDir(), time.Hour)
+	s.Add("r", "[a] first")
+	s.Add("r", "[a] second")
+
+	type entry struct{ id, line string }
+	var offered []entry
+	if err := s.Offer("r", func(id, line string) bool {
+		offered = append(offered, entry{id, line})
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(offered) != 2 || offered[0].line != "[a] first" || offered[1].line != "[a] second" {
+		t.Fatalf("offered %v", offered)
+	}
+	if offered[0].id == "" || offered[0].id == offered[1].id {
+		t.Fatalf("ids not stable/unique: %v", offered)
+	}
+	// Nothing was removed: both still pending, and a second Offer
+	// yields the same entries under the same ids.
+	if n := s.Pending("r"); n != 2 {
+		t.Fatalf("Pending = %d after Offer, want 2 (offer must not delete)", n)
+	}
+	var again []entry
+	s.Offer("r", func(id, line string) bool { again = append(again, entry{id, line}); return true })
+	if len(again) != 2 || again[0].id != offered[0].id {
+		t.Fatalf("re-offer ids changed: %v vs %v", again, offered)
+	}
+
+	// Remove is the ACK: the entry is gone for good.
+	if err := s.Remove("r", offered[0].id); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.Pending("r"); n != 1 {
+		t.Fatalf("Pending = %d after Remove, want 1", n)
+	}
+	var final []entry
+	s.Offer("r", func(id, line string) bool { final = append(final, entry{id, line}); return true })
+	if len(final) != 1 || final[0].id != offered[1].id {
+		t.Fatalf("wrong survivor: %v", final)
+	}
+}
+
+func TestRemoveRejectsUnsafeIDs(t *testing.T) {
+	s := NewFileSpool(t.TempDir(), time.Hour)
+	s.Add("r", "[a] x")
+	if err := s.Remove("r", "../../etc/passwd"); err == nil {
+		t.Fatal("Remove accepted a path-traversal id")
 	}
 }
 
@@ -111,10 +187,9 @@ func TestSpoolRejectsUnsafeRiderName(t *testing.T) {
 // (PR #14 review.) SweepExpired walks every rider dir.
 func TestSweepExpiredClearsAbandonedNames(t *testing.T) {
 	dir := t.TempDir()
-	s := NewFileSpool(dir, 50*time.Millisecond)
-	s.Add("typo-rider", "[x] never collected")
-	s.Add("gone-rider", "[x] also stale")
-	time.Sleep(80 * time.Millisecond)
+	s := NewFileSpool(dir, time.Hour)
+	addAged(t, dir, "typo-rider", "[x] never collected", 2*time.Hour)
+	addAged(t, dir, "gone-rider", "[x] also stale", 3*time.Hour)
 	s.Add("live-rider", "[x] fresh")
 
 	if err := s.SweepExpired(); err != nil {
@@ -135,11 +210,12 @@ func TestSweepExpiredClearsAbandonedNames(t *testing.T) {
 // stale entries for never-returning names accumulate until the next
 // restart, which may be never. (PR #15 review.)
 func TestSweepEveryExpiresWhileRunning(t *testing.T) {
-	s := NewFileSpool(t.TempDir(), 40*time.Millisecond)
+	dir := t.TempDir()
+	s := NewFileSpool(dir, time.Hour)
 	stop := s.SweepEvery(25*time.Millisecond, nil)
 	defer stop()
 
-	s.Add("abandoned", "[x] never collected")
+	addAged(t, dir, "abandoned", "[x] never collected", 2*time.Hour)
 	deadline := time.Now().Add(2 * time.Second)
 	for s.Pending("abandoned") != 0 {
 		if time.Now().After(deadline) {

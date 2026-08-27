@@ -1,6 +1,7 @@
 package task
 
 import (
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -228,12 +229,26 @@ func TestRiderRejectsWhenQueueFull(t *testing.T) {
 // is overloaded. (PR #17 review, P1.)
 func TestRejectDoesNotBlockTheCaller(t *testing.T) {
 	block := make(chan struct{})
-	defer close(block)
+	var terminals atomic.Int32
+	// Release the worker, then wait for every task's terminal snapshot
+	// (emitted after its final disk write) before TempDir cleanup runs.
+	defer func() {
+		close(block)
+		deadline := time.Now().Add(10 * time.Second)
+		for terminals.Load() < int32(taskQueueDepth+1) && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
 	blockingSend := make(chan string) // unbuffered, nobody reads: Send blocks
 	r := &Rider{
 		Dir:    t.TempDir(),
 		Runner: func(string) (string, error) { <-block; return "ok", nil },
 		Send: func(line string) {
+			if _, payload, ok := bus.ParseAddressed(line); ok {
+				if tk, ok := DecodeTask(payload); ok && tk.Status.State.Terminal() {
+					terminals.Add(1)
+				}
+			}
 			select {
 			case blockingSend <- line:
 			case <-block:
@@ -251,6 +266,169 @@ func TestRejectDoesNotBlockTheCaller(t *testing.T) {
 	r.Handle("alice", EncodeMessage(msg))
 	if d := time.Since(start); d > 100*time.Millisecond {
 		t.Fatalf("overflow Handle blocked the read loop for %v", d)
+	}
+}
+
+// The rider's ACK means DURABLE acceptance (issue #7): it must fire
+// only after the SUBMITTED snapshot is on disk — never on enqueue,
+// which an unlucky crash would erase.
+func TestRiderAcksOnlyAfterSubmittedPersisted(t *testing.T) {
+	dir := t.TempDir()
+	acked := make(chan string, 1)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	terminal := make(chan struct{}, 1)
+	r := &Rider{
+		Dir: dir,
+		Runner: func(string) (string, error) {
+			close(started)
+			<-release
+			return "ok", nil
+		},
+		Send: func(line string) {
+			if _, payload, ok := bus.ParseAddressed(line); ok {
+				if tk, ok := DecodeTask(payload); ok && tk.Status.State.Terminal() {
+					terminal <- struct{}{}
+				}
+			}
+		},
+		Acked: func(id string) { acked <- id },
+	}
+	// The worker keeps writing task files until the terminal snapshot
+	// is out; wait for it or TempDir cleanup races the writes.
+	defer func() {
+		select {
+		case <-terminal:
+		case <-time.After(5 * time.Second):
+		}
+	}()
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("x"))
+	if !r.HandleEnveloped("alice", "env-42", EncodeMessage(msg)) {
+		t.Fatal("HandleEnveloped did not claim the task")
+	}
+
+	select {
+	case id := <-acked:
+		if id != "env-42" {
+			t.Fatalf("acked %q, want env-42", id)
+		}
+		// At ACK time the SUBMITTED task must already be on disk.
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) == 0 {
+			t.Fatalf("acked before any task was persisted (entries=%v err=%v)", entries, err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no ACK for the accepted task")
+	}
+	<-started
+	close(release)
+}
+
+// A redelivery that arrives while the first copy is still queued (not
+// yet persisted) must be ignored WITHOUT an ACK: acking it would let
+// the hub delete its only durable copy before the rider has one.
+// (PR #18 review, P1.)
+func TestRedeliveryBeforePersistNeitherAcksNorDuplicates(t *testing.T) {
+	block := make(chan struct{})
+	var acks, runs atomic.Int32
+	terminal := make(chan struct{}, 4)
+	r := &Rider{
+		Dir: t.TempDir(),
+		Runner: func(string) (string, error) {
+			runs.Add(1)
+			<-block
+			return "ok", nil
+		},
+		Send: func(line string) {
+			if _, payload, ok := bus.ParseAddressed(line); ok {
+				if tk, ok := DecodeTask(payload); ok && tk.Status.State.Terminal() {
+					terminal <- struct{}{}
+				}
+			}
+		},
+		Acked: func(string) { acks.Add(1) },
+	}
+	defer func() {
+		close(block)
+		// BOTH tasks must reach their terminal state (and final disk
+		// write) before TempDir cleanup runs.
+		for done := 0; done < 2; done++ {
+			select {
+			case <-terminal:
+			case <-time.After(5 * time.Second):
+				return
+			}
+		}
+	}()
+
+	// Two tasks: the first occupies the runner (its SUBMITTED is
+	// persisted and acked), the second waits in the queue unpersisted.
+	m1 := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("one"))
+	m2 := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("two"))
+	r.HandleEnveloped("alice", "env-1", EncodeMessage(m1))
+	deadline := time.Now().Add(2 * time.Second)
+	for acks.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	r.HandleEnveloped("alice", "env-2", EncodeMessage(m2))
+
+	// env-2 is queued, not persisted. Its redelivery must be a no-op.
+	r.HandleEnveloped("alice", "env-2", EncodeMessage(m2))
+	time.Sleep(100 * time.Millisecond)
+	if got := acks.Load(); got != 1 {
+		t.Fatalf("acks = %d; the unpersisted task's redelivery must not be acked", got)
+	}
+	if got := runs.Load(); got > 1 {
+		t.Fatalf("runs = %d; the redelivery was double-enqueued", got)
+	}
+}
+
+// Dedup must survive a rider restart: a crash after SUBMITTED persists
+// but before the ACK reaches the hub redelivers the envelope to a
+// fresh process, which must re-ACK without re-executing. (PR #18
+// review, P1.)
+func TestAcceptedEnvelopesSurviveRestart(t *testing.T) {
+	dir := t.TempDir()
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("dangerous non-idempotent work"))
+
+	run1 := make(chan struct{}, 2)
+	terminal := make(chan struct{}, 2)
+	r1 := &Rider{
+		Dir:    dir,
+		Runner: func(string) (string, error) { run1 <- struct{}{}; return "done", nil },
+		Send: func(line string) {
+			if _, payload, ok := bus.ParseAddressed(line); ok {
+				if tk, ok := DecodeTask(payload); ok && tk.Status.State.Terminal() {
+					terminal <- struct{}{}
+				}
+			}
+		},
+		Acked: func(string) {},
+	}
+	r1.HandleEnveloped("alice", "env-9", EncodeMessage(msg))
+	select {
+	case <-terminal:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first execution never finished")
+	}
+
+	// "Crash" and restart: a NEW Rider over the same Dir. The hub never
+	// got the ACK, so it redelivers env-9.
+	reacked := make(chan string, 1)
+	r2 := &Rider{
+		Dir:    dir,
+		Runner: func(string) (string, error) { t.Error("redelivered task re-executed after restart"); return "", nil },
+		Send:   func(string) {},
+		Acked:  func(id string) { reacked <- id },
+	}
+	r2.HandleEnveloped("alice", "env-9", EncodeMessage(msg))
+	select {
+	case id := <-reacked:
+		if id != "env-9" {
+			t.Fatalf("re-acked %q", id)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("restarted rider never re-acked the already-accepted envelope")
 	}
 }
 

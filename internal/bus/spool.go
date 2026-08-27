@@ -10,16 +10,14 @@ import (
 	"time"
 )
 
-// Spooler is what the hub needs from a spool: durable per-rider lines,
-// drained in order on rejoin. Drain hands entries oldest-first to
-// accept and removes each entry only AFTER accept returns true; the
-// first false stops the drain and leaves that entry and everything
-// after it spooled. An entry is therefore never deleted before it has
-// been taken for delivery — a drain that outruns the receiver loses
-// nothing (PR #15 review, P1).
+// Spooler is what the hub needs from a spool: durable per-rider
+// lines. Offer feeds entries oldest-first WITHOUT removing them;
+// Remove is the ACK — an entry is never deleted before the receiver
+// durably accepted it (issue #7, ADR 0004).
 type Spooler interface {
-	Add(rider, line string) error
-	Drain(rider string, accept func(line string) bool) (delivered, remaining int, err error)
+	Add(rider, line string) (id string, err error)
+	Offer(rider string, accept func(id, line string) bool) error
+	Remove(rider, id string) error
 	Pending(rider string) int
 }
 
@@ -45,14 +43,15 @@ func NewFileSpool(dir string, ttl time.Duration) *FileSpool {
 	return &FileSpool{dir: dir, ttl: ttl}
 }
 
-// Add durably stores one line for a rider that is not connected.
-func (s *FileSpool) Add(rider, line string) error {
+// Add durably stores one line for a rider that is not connected,
+// returning the entry id (the token an ACK must carry).
+func (s *FileSpool) Add(rider, line string) (string, error) {
 	rdir, err := s.riderDir(rider)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := os.MkdirAll(rdir, 0o700); err != nil {
-		return err
+		return "", err
 	}
 	s.mu.Lock()
 	s.seq++
@@ -71,50 +70,55 @@ func (s *FileSpool) Add(rider, line string) error {
 	tmp := filepath.Join(rdir, name+".tmp")
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if _, err := f.WriteString(line); err != nil {
 		f.Close()
-		return err
+		return "", err
 	}
 	// The spool's one job is surviving a host crash: fsync the entry
 	// before the rename, and the directory after, or "durably stored"
 	// is only a page-cache promise (PR #14 review).
 	if err := f.Sync(); err != nil {
 		f.Close()
-		return err
+		return "", err
 	}
 	if err := f.Close(); err != nil {
-		return err
+		return "", err
 	}
 	if err := os.Rename(tmp, filepath.Join(rdir, name)); err != nil {
-		return err
+		return "", err
 	}
 	// The directory entry must be durable too, and a failure here is
 	// the caller's business: "durably stored" must not be claimed on a
 	// best-effort sync (PR #15 review).
 	d, err := os.Open(rdir)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer d.Close()
-	return d.Sync()
+	if err := d.Sync(); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(name, ".line"), nil
 }
 
-// Drain feeds unexpired spooled lines for a rider to accept, oldest
-// first, removing each file only after accept takes the line. Expired
-// entries are deleted, not offered. The first refusal ends the drain
-// with everything undelivered still on disk.
-func (s *FileSpool) Drain(rider string, accept func(line string) bool) (delivered, remaining int, err error) {
+// Offer feeds unexpired spooled entries to accept, oldest first,
+// WITHOUT removing anything: an entry leaves the spool only via
+// Remove, once the receiver has acknowledged it — delivery to a
+// connection is an attempt, not delivery (issue #7, ADR 0004). The id
+// handed to accept is stable across Offers and is the token the ACK
+// carries. The first refusal ends the pass.
+func (s *FileSpool) Offer(rider string, accept func(id, line string) bool) error {
 	rdir, err := s.riderDir(rider)
 	if err != nil {
-		return 0, 0, err
+		return err
 	}
 	names, err := spoolEntries(rdir)
 	if err != nil {
-		return 0, 0, err
+		return err
 	}
-	for i, name := range names {
+	for _, name := range names {
 		path := filepath.Join(rdir, name)
 		if s.expired(name) {
 			os.Remove(path)
@@ -122,17 +126,27 @@ func (s *FileSpool) Drain(rider string, accept func(line string) bool) (delivere
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return delivered, len(names) - i, err
+			return err
 		}
-		if !accept(string(data)) {
-			return delivered, len(names) - i, nil
-		}
-		delivered++
-		if err := os.Remove(path); err != nil {
-			return delivered, len(names) - i - 1, err
+		id := strings.TrimSuffix(name, ".line")
+		if !accept(id, string(data)) {
+			return nil
 		}
 	}
-	return delivered, 0, nil
+	return nil
+}
+
+// Remove deletes one acknowledged entry by the id Offer handed out.
+func (s *FileSpool) Remove(rider, id string) error {
+	rdir, err := s.riderDir(rider)
+	if err != nil {
+		return err
+	}
+	name := id + ".line"
+	if filepath.Base(name) != name || id == "" {
+		return fmt.Errorf("invalid spool entry id %q", id)
+	}
+	return os.Remove(filepath.Join(rdir, name))
 }
 
 // Pending reports how many lines wait for a rider (expired included —

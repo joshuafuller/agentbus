@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -60,7 +61,7 @@ func recvMessage(t *testing.T, ch chan string) string {
 
 func TestThreePeersRelay(t *testing.T) {
 	sink := make(chan string, 8)
-	h := NewHub("host", func(line string) { sink <- line })
+	h := NewHub("host", func(line string) bool { sink <- line; return true })
 
 	a, aLines := testPeer(t, h, "alice")
 	_, bLines := testPeer(t, h, "bob")
@@ -93,7 +94,7 @@ func TestThreePeersRelay(t *testing.T) {
 
 func TestAddressedLineReachesOnlyTarget(t *testing.T) {
 	sink := make(chan string, 8)
-	h := NewHub("host", func(line string) { sink <- line })
+	h := NewHub("host", func(line string) bool { sink <- line; return true })
 
 	a, _ := testPeer(t, h, "alice")
 	_, bLines := testPeer(t, h, "bob")
@@ -123,7 +124,7 @@ func TestAddressedLineReachesOnlyTarget(t *testing.T) {
 
 func TestAddressedLineToHostReachesSinkOnly(t *testing.T) {
 	sink := make(chan string, 8)
-	h := NewHub("host", func(line string) { sink <- line })
+	h := NewHub("host", func(line string) bool { sink <- line; return true })
 
 	a, _ := testPeer(t, h, "alice")
 	_, bLines := testPeer(t, h, "bob")
@@ -215,6 +216,158 @@ func TestTaskNoticeHookIgnoresPlainAddressedLines(t *testing.T) {
 	}
 }
 
+// recvEnvelope reads lines until an enveloped message arrives,
+// returning its sender, envelope id, and payload.
+func recvEnvelope(t *testing.T, ch chan string) (from, id, payload string) {
+	t.Helper()
+	l := recvMessage(t, ch)
+	f, body, ok := ParseMessage(l)
+	if !ok {
+		t.Fatalf("not a message: %q", l)
+	}
+	id, p, ok := ParseEnvelope(body)
+	if !ok {
+		t.Fatalf("addressed delivery not enveloped: %q", l)
+	}
+	return f, id, p
+}
+
+// The ACK contract end to end: an addressed line arrives enveloped,
+// stays pending until the receiver ACKs, and the ACK clears it.
+func TestAddressedDeliveryRequiresAck(t *testing.T) {
+	h := NewHub("host", nil)
+	h.Spool = NewFileSpool(t.TempDir(), time.Hour)
+	h.RetryInterval = 200 * time.Millisecond
+	a, _ := testPeer(t, h, "alice")
+	bob, bLines := testPeer(t, h, "bob")
+
+	if _, err := a.Write([]byte(Addressed("bob", "A2A-MSG {}") + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	from, id, payload := recvEnvelope(t, bLines)
+	if from != "alice" || payload != "A2A-MSG {}" || id == "" {
+		t.Fatalf("got from=%q id=%q payload=%q", from, id, payload)
+	}
+	if n := h.Spool.Pending("bob"); n != 1 {
+		t.Fatalf("entry not retained pre-ACK (pending=%d)", n)
+	}
+
+	if _, err := bob.Write([]byte(Ack(id) + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for h.Spool.Pending("bob") != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("ACK did not clear the entry (pending=%d)", h.Spool.Pending("bob"))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// And no redelivery after the ACK.
+	select {
+	case l := <-bLines:
+		if !IsNotice(l) {
+			t.Fatalf("redelivered after ACK: %q", l)
+		}
+	case <-time.After(3 * h.RetryInterval):
+	}
+}
+
+func TestUnackedEnvelopeIsRedelivered(t *testing.T) {
+	h := NewHub("host", nil)
+	h.Spool = NewFileSpool(t.TempDir(), time.Hour)
+	h.RetryInterval = 150 * time.Millisecond
+	a, _ := testPeer(t, h, "alice")
+	_, bLines := testPeer(t, h, "bob")
+
+	a.Write([]byte(Addressed("bob", "important") + "\n"))
+	_, id1, _ := recvEnvelope(t, bLines)
+	// No ACK: the same entry must come again.
+	_, id2, payload := recvEnvelope(t, bLines)
+	if id2 != id1 || payload != "important" {
+		t.Fatalf("redelivery mismatch: id1=%q id2=%q payload=%q", id1, id2, payload)
+	}
+}
+
+func TestCrashBeforeAckRedeliversOnRejoin(t *testing.T) {
+	h := NewHub("host", nil)
+	h.Spool = NewFileSpool(t.TempDir(), time.Hour)
+	h.RetryInterval = 150 * time.Millisecond
+	a, _ := testPeer(t, h, "alice")
+	bob, bLines := testPeer(t, h, "bob")
+
+	a.Write([]byte(Addressed("bob", "survive me") + "\n"))
+	_, id1, _ := recvEnvelope(t, bLines)
+	bob.Close() // crash without ACK
+
+	_, bLines2 := testPeer(t, h, "bob")
+	_, id2, payload := recvEnvelope(t, bLines2)
+	if id2 != id1 || payload != "survive me" {
+		t.Fatalf("rejoin redelivery mismatch: %q %q", id2, payload)
+	}
+}
+
+// Host-addressed lines get the same durable-first contract as remote
+// riders: spooled before the sink sees them (enveloped), forgotten
+// only on AckLocal, and redeliverable via DrainLocal. Previously they
+// bypassed the spool entirely — a host crash before the wake worker
+// persisted lost the task with no copy anywhere. (PR #18 review, P1.)
+func TestHostAddressedIsDurableUntilLocalAck(t *testing.T) {
+	sunk := make(chan string, 8)
+	h := NewHub("host", func(line string) bool { sunk <- line; return true })
+	h.Spool = NewFileSpool(t.TempDir(), time.Hour)
+	a, _ := testPeer(t, h, "alice")
+
+	if _, err := a.Write([]byte(Addressed("host", "A2A-MSG for-the-host") + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	select {
+	case l := <-sunk:
+		from, body, _ := ParseMessage(l)
+		var ok bool
+		id, _, ok = ParseEnvelope(body)
+		if !ok || from != "alice" {
+			t.Fatalf("host sink got unenveloped %q", l)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("host sink never received the line")
+	}
+	if n := h.Spool.Pending("host"); n != 1 {
+		t.Fatalf("host entry not retained pre-ack (pending=%d)", n)
+	}
+	h.AckLocal(id)
+	if n := h.Spool.Pending("host"); n != 0 {
+		t.Fatalf("AckLocal did not clear the entry (pending=%d)", n)
+	}
+}
+
+func TestDrainLocalRedeliversUnacked(t *testing.T) {
+	var accept atomic.Bool
+	sunk := make(chan string, 8)
+	h := NewHub("host", func(line string) bool { sunk <- line; return accept.Load() })
+	h.Spool = NewFileSpool(t.TempDir(), time.Hour)
+	a, _ := testPeer(t, h, "alice")
+
+	a.Write([]byte(Addressed("host", "survive the host crash") + "\n"))
+	<-sunk // first attempt, refused (accept=false); entry must remain
+	if n := h.Spool.Pending("host"); n != 1 {
+		t.Fatalf("refused delivery cleared the entry (pending=%d)", n)
+	}
+
+	// "Restart": DrainLocal re-offers; this time the sink accepts.
+	accept.Store(true)
+	h.DrainLocal()
+	select {
+	case l := <-sunk:
+		_, body, _ := ParseMessage(l)
+		if _, p, ok := ParseEnvelope(body); !ok || p != "survive the host crash" {
+			t.Fatalf("redelivery mangled: %q", l)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("DrainLocal did not redeliver")
+	}
+}
+
 // The Gate 3 contract: an addressed line to a rider that is not
 // connected is durably spooled — with a visible notice, never a silent
 // drop — and flushed in order when that name joins.
@@ -236,8 +389,9 @@ func TestAddressedLineToAbsentRiderIsSpooled(t *testing.T) {
 
 	// The rider joins and receives the spooled line before anything else.
 	_, rLines := testPeer(t, h, "away-rider")
-	if got := recvMessage(t, rLines); got != Message("alice", "A2A-MSG later-task") {
-		t.Fatalf("rejoined rider got %q, want the spooled line", got)
+	from, _, payload := recvEnvelope(t, rLines)
+	if from != "alice" || payload != "A2A-MSG later-task" {
+		t.Fatalf("rejoined rider got %q from %q, want the spooled line", payload, from)
 	}
 }
 
@@ -259,11 +413,11 @@ func TestSpoolFlushPreservesOrderAcrossSenders(t *testing.T) {
 	waitPending(t, h.Spool, "away-rider", 2)
 
 	_, rLines := testPeer(t, h, "away-rider")
-	if got := recvMessage(t, rLines); got != Message("alice", "first") {
-		t.Fatalf("got %q, want alice's line first", got)
+	if from, _, p := recvEnvelope(t, rLines); from != "alice" || p != "first" {
+		t.Fatalf("got %q from %q, want alice's line first", p, from)
 	}
-	if got := recvMessage(t, rLines); got != Message("bob", "second") {
-		t.Fatalf("got %q, want bob's line second", got)
+	if from, _, p := recvEnvelope(t, rLines); from != "bob" || p != "second" {
+		t.Fatalf("got %q from %q, want bob's line second", p, from)
 	}
 }
 
@@ -327,9 +481,9 @@ func TestConcurrentSendAndJoinNeverStrandsALine(t *testing.T) {
 		go a.Write([]byte(Addressed("flappy", "payload") + "\n"))
 		_, rLines := testPeer(t, h, "flappy")
 
-		// The line must reach flappy — live or via drain. If it went to
-		// the spool after the drain, nothing will ever deliver it.
-		deadline := time.After(2 * time.Second)
+		// The line must reach flappy — live or via catch-up. If it went
+		// to a spool nobody pumps, nothing will ever deliver it.
+		deadline := time.After(3 * time.Second)
 		for {
 			var l string
 			select {
@@ -338,7 +492,9 @@ func TestConcurrentSendAndJoinNeverStrandsALine(t *testing.T) {
 				t.Fatalf("iteration %d: line stranded (pending=%d)", i, h.Spool.Pending("flappy"))
 			}
 			if !IsNotice(l) {
-				if l != Message("alice", "payload") {
+				from, body, _ := ParseMessage(l)
+				_, p, ok := ParseEnvelope(body)
+				if !ok || from != "alice" || p != "payload" {
 					t.Fatalf("flappy got %q", l)
 				}
 				break
@@ -357,62 +513,58 @@ func TestCatchUpBeyondOutboxLosesNothing(t *testing.T) {
 	h.Spool = NewFileSpool(t.TempDir(), time.Hour)
 	total := outboxDepth + 200
 	for i := 0; i < total; i++ {
-		if err := h.Spool.Add("returning", fmt.Sprintf("[a] m%04d", i)); err != nil {
+		if _, err := h.Spool.Add("returning", fmt.Sprintf("[a] m%04d", i)); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	_, rLines := testPeer(t, h, "returning")
+	h.RetryInterval = 2 * time.Second
+	rider, rLines := testPeer(t, h, "returning")
 
-	// Throttle: do not read yet. A fast reader empties the outbox as
-	// the drain fills it, so everything fits and overflow is never
-	// exercised. With the reader parked, the outbox fills, the drain
-	// stops at headroom, and the remainder must stay spooled. Wait for
-	// the pending count to stabilize at a nonzero value.
-	prev := -1
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		cur := h.Spool.Pending("returning")
-		if cur > 0 && cur == prev {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("drain never stabilized with a parked reader (pending=%d)", cur)
-		}
-		prev = cur
-		time.Sleep(200 * time.Millisecond)
-	}
-
-	// The stall proves overflow really happened; nothing may be lost.
-	if received := h.Spool.Pending("returning"); received == total {
-		t.Fatal("nothing was drained at all")
-	}
-
-	// Now resume reading: the remainder must flow on THIS connection,
-	// in order, with no reconnect — a backlog that only a deliberate
-	// rejoin can collect is a stranding bug (PR #17 review, P1).
+	// The rider ACKs as it reads; redelivered duplicates (possible
+	// with at-least-once) are dropped by id. Every line must arrive on
+	// THIS connection, in order, with no reconnect, and the spool must
+	// empty as the ACKs land — that is the whole Gate 3 contract.
 	received := 0
-	overall := time.After(20 * time.Second)
+	seen := map[string]bool{}
+	overall := time.After(60 * time.Second)
 	for received < total {
 		select {
 		case l, ok := <-rLines:
 			if !ok {
 				t.Fatalf("connection closed during catch-up after %d lines", received)
 			}
-			if !IsNotice(l) {
-				want := fmt.Sprintf("m%04d", received)
-				if l != Message("a", want) {
-					t.Fatalf("line %d out of order: got %q want ...%q", received, l, want)
-				}
-				received++
+			if IsNotice(l) {
+				continue
 			}
+			_, body, _ := ParseMessage(l)
+			id, p, ok := ParseEnvelope(body)
+			if !ok {
+				t.Fatalf("unenveloped delivery: %q", l)
+			}
+			if _, err := rider.Write([]byte(Ack(id) + "\n")); err != nil {
+				t.Fatal(err)
+			}
+			if seen[id] {
+				continue // redelivery; already counted
+			}
+			seen[id] = true
+			want := fmt.Sprintf("m%04d", received)
+			if p != want {
+				t.Fatalf("line %d out of order: got %q want %q", received, p, want)
+			}
+			received++
 		case <-overall:
 			t.Fatalf("catch-up stalled at %d/%d (pending=%d) — remainder stranded",
 				received, total, h.Spool.Pending("returning"))
 		}
 	}
-	if h.Spool.Pending("returning") != 0 {
-		t.Fatalf("all lines received yet %d still pending", h.Spool.Pending("returning"))
+	deadline := time.Now().Add(10 * time.Second)
+	for h.Spool.Pending("returning") != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("all lines acked yet %d still pending", h.Spool.Pending("returning"))
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -423,12 +575,13 @@ func TestLiveLineWaitsBehindBacklog(t *testing.T) {
 	h.Spool = NewFileSpool(t.TempDir(), time.Hour)
 	total := outboxDepth + 100
 	for i := 0; i < total; i++ {
-		if err := h.Spool.Add("returning", fmt.Sprintf("[a] m%04d", i)); err != nil {
+		if _, err := h.Spool.Add("returning", fmt.Sprintf("[a] m%04d", i)); err != nil {
 			t.Fatal(err)
 		}
 	}
+	h.RetryInterval = 2 * time.Second
 	sender, _ := testPeer(t, h, "alice")
-	_, rLines := testPeer(t, h, "returning")
+	rider, rLines := testPeer(t, h, "returning")
 
 	// A live line sent while the backlog is still draining.
 	if _, err := sender.Write([]byte(Addressed("returning", "the live one") + "\n")); err != nil {
@@ -437,7 +590,8 @@ func TestLiveLineWaitsBehindBacklog(t *testing.T) {
 
 	received := 0
 	sawLive := false
-	overall := time.After(20 * time.Second)
+	seen := map[string]bool{}
+	overall := time.After(60 * time.Second)
 	for received < total {
 		select {
 		case l, ok := <-rLines:
@@ -447,12 +601,22 @@ func TestLiveLineWaitsBehindBacklog(t *testing.T) {
 			if IsNotice(l) {
 				continue
 			}
-			if l == Message("alice", "the live one") {
+			from, body, _ := ParseMessage(l)
+			id, p, ok := ParseEnvelope(body)
+			if !ok {
+				t.Fatalf("unenveloped delivery: %q", l)
+			}
+			rider.Write([]byte(Ack(id) + "\n"))
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			if from == "alice" && p == "the live one" {
 				sawLive = true
 				continue
 			}
 			if sawLive {
-				t.Fatalf("live line overtook backlog: %q arrived after it", l)
+				t.Fatalf("live line overtook backlog: %q arrived after it", p)
 			}
 			received++
 		case <-overall:
@@ -557,7 +721,7 @@ func TestOneshotReceivesNoRelays(t *testing.T) {
 // host's own name, but must receive messages from any other name.
 func TestSinkSameNameFilter(t *testing.T) {
 	sink := make(chan string, 8)
-	h := NewHub("hostname", func(line string) { sink <- line })
+	h := NewHub("hostname", func(line string) bool { sink <- line; return true })
 
 	// A oneshot sender under the host's own name: sink must NOT receive it.
 	same := oneshotPeer(t, h, "hostname")
