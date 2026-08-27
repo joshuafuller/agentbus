@@ -47,7 +47,37 @@ func codexOnMsg(dir, sessionID, model string) string {
 	if model != "" {
 		modelFlag = " -m " + model
 	}
-	return fmt.Sprintf(`cd %s && codex exec resume %s%s "$AGENTBUS_MSG"`, dir, sessionID, modelFlag)
+	// --skip-git-repo-check: the rider home is not a git repo and codex
+	// exec otherwise refuses (or, headless, wedges on stdin).
+	return fmt.Sprintf(`cd %s && codex exec resume %s%s --skip-git-repo-check "$AGENTBUS_MSG"`, dir, sessionID, modelFlag)
+}
+
+// codexBootArgs builds the argument list for the rider's bootstrap
+// codex invocation.
+func codexBootArgs(briefing, model string) []string {
+	args := []string{"exec", "--skip-git-repo-check", briefing}
+	if model != "" {
+		args = append(args, "-m", model)
+	}
+	return args
+}
+
+// selfTest proves the wake command actually works before wire reports
+// success: it runs ONE probe message through the exact --on-msg the
+// join will use and requires a non-empty answer. "welcome aboard" only
+// proves the bus link; the original deaf-rider incident was a
+// malformed wake command behind a perfectly healthy join (issues #1,
+// #8). Costs one model turn at wire time — the cheapest moment to
+// find out, in front of the person who can fix it.
+func selfTest(onMsg string) error {
+	out, err := execRunner(onMsg)("wire self-test: reply with exactly OK and nothing else")
+	if err != nil {
+		return fmt.Errorf("wake command failed its self-test: %w", err)
+	}
+	if strings.TrimSpace(out) == "" {
+		return fmt.Errorf("wake command ran but produced no answer — the rider would be deaf")
+	}
+	return nil
 }
 
 // runWire sets up the complete wake wiring for a runtime: bootstrap a
@@ -95,10 +125,7 @@ func runWire(runtime, ticket, name, model string) error {
 		onMsg = claudeOnMsg(dir, model)
 	case "codex":
 		fmt.Fprintf(os.Stderr, "wiring %s: creating rider session in %s...\n", name, dir)
-		boot := exec.Command("codex", "exec", briefing(ticket, name))
-		if model != "" {
-			boot.Args = append(boot.Args, "-m", model)
-		}
+		boot := exec.Command("codex", codexBootArgs(briefing(ticket, name), model)...)
 		boot.Dir = dir
 		out, err := boot.CombinedOutput()
 		if err != nil {
@@ -111,6 +138,13 @@ func runWire(runtime, ticket, name, model string) error {
 		onMsg = codexOnMsg(dir, string(m[1]), model)
 	default:
 		return fmt.Errorf("unknown runtime %q (want claude or codex)", runtime)
+	}
+
+	// Prove the wake path before wiring anything to it (issue #8): one
+	// probe turn through the real command, requiring a real answer.
+	fmt.Fprintf(os.Stderr, "wiring %s: self-testing the wake command (one probe turn)...\n", name)
+	if err := selfTest(onMsg); err != nil {
+		return fmt.Errorf("%s is NOT wired — %w\nwake command was: %s", name, err, onMsg)
 	}
 
 	logPath := filepath.Join(dir, "join.log")
