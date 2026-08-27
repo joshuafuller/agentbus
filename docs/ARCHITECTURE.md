@@ -187,5 +187,13 @@ held until real usage demands it:
 | Sender authentication | Identity is its own subsystem | signed names / MLS |
 | Multiparty group crypto | Two-party transport works first | above the transport |
 
+> Two of these are now under active reconsideration, not because the rule
+> changed but because the rule's trigger fired: the activation loop got real
+> cross-host usage on 2026-08-27 and sender authentication failed
+> non-adversarially within hours. See
+> [ADR 0002](adr/0002-rider-identity-signed-agent-cards.md) for the argument
+> that the gate is met, and [ADR 0001](adr/0001-adopt-a2a-for-task-semantics.md)
+> for why the layers above the transport should be A2A's rather than ours.
+
 See [SECURITY.md](../SECURITY.md) for the threat model and
 [PROTOCOL.md](PROTOCOL.md) for the wire format.
