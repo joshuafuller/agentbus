@@ -3,9 +3,14 @@
 # commit, push, open a PR. The approvals bypass is confined to the
 # container's throwaway filesystem.
 #
-#   run.sh <owner/repo> <branch> <model> <prompt-file> [timeout-seconds]
+#   run.sh <owner/repo> <branch> <model> <prompt-file> [timeout-seconds] [effort]
 #
-# Needs: docker, a logged-in gh on the host (token is minted per run),
+# timeout-seconds 0 means NO timeout: a long-lived agent that runs
+# until stopped from outside (docker stop <container>). Containers are
+# named agentbus-agent-<branch> so they are easy to find and stop.
+#
+# Needs: docker, a logged-in gh on the host (the host token is read and passed
+# through for each run),
 # and ~/.codex/auth.json + config.toml (seeded read-only into the run).
 set -euo pipefail
 
@@ -14,7 +19,9 @@ BRANCH="${2:?branch}"
 MODEL="${3:?model}"
 PROMPT_FILE="${4:?prompt file}"
 TIMEOUT="${5:-900}"
+EFFORT="${6:-high}"
 IMAGE="agentbus-codex-agent"
+CONTAINER="agentbus-agent-$(printf '%s' "$BRANCH" | sed 's/[^a-zA-Z0-9_.-]/-/g')"
 
 # Seed a throwaway codex home: auth + config only; session state stays
 # in the container and dies with it.
@@ -28,9 +35,10 @@ GH_TOKEN="$(gh auth token)"
 GIT_NAME="$(git config user.name || echo agentbus-codex-agent)"
 GIT_EMAIL="$(git config user.email || echo codex-agent@localhost)"
 
-docker run --rm \
+docker run --rm --name "$CONTAINER" \
   -e GH_TOKEN="$GH_TOKEN" \
-  -e REPO="$REPO" -e BRANCH="$BRANCH" -e MODEL="$MODEL" \
+  -e REPO="$REPO" -e BRANCH="$BRANCH" -e MODEL="$MODEL" -e EFFORT="$EFFORT" \
+  -e TIMEOUT="$TIMEOUT" \
   -e GIT_NAME="$GIT_NAME" -e GIT_EMAIL="$GIT_EMAIL" \
   -v "$SEED":/seed:ro \
   -v "$(realpath "$PROMPT_FILE")":/prompt.md:ro \
@@ -44,9 +52,15 @@ docker run --rm \
     gh repo clone "$REPO" work -- --quiet
     cd work
     git checkout -q -b "$BRANCH"
-    timeout '"$TIMEOUT"' codex exec \
+    RUN=(codex exec
       --skip-git-repo-check \
       --dangerously-bypass-approvals-and-sandbox \
       -m "$MODEL" \
-      "$(cat /prompt.md)" </dev/null
+      -c model_reasoning_effort="$EFFORT" \
+      "$(cat /prompt.md)")
+    if [ "$TIMEOUT" = "0" ]; then
+      "${RUN[@]}" </dev/null
+    else
+      timeout "$TIMEOUT" "${RUN[@]}" </dev/null
+    fi
   '
