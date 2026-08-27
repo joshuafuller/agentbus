@@ -886,3 +886,80 @@ func drainNotice(t *testing.T, lines <-chan string, want string) {
 		}
 	}
 }
+
+// Liveness (issue #8, item 2): a rider that goes quiet past the
+// threshold is flagged on the feed — deaf becomes a visible state —
+// and its return is announced. Heartbeats (PING) count as life.
+func TestQuietRiderIsFlaggedAndRecoveryAnnounced(t *testing.T) {
+	h := NewHub("host", nil)
+	h.QuietAfter = 300 * time.Millisecond
+	quiet, _ := testPeer(t, h, "quiet-rider")
+	_, obsLines := testPeer(t, h, "observer")
+
+	// Wait past the threshold: the feed must name the silence.
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case l := <-obsLines:
+			if IsNotice(l) && strings.Contains(l, "quiet-rider") && strings.Contains(l, "unresponsive") {
+				goto flagged
+			}
+		case <-deadline:
+			t.Fatal("quiet rider never flagged on the feed")
+		}
+	}
+flagged:
+	// Any line from the rider (a heartbeat counts) announces recovery.
+	if _, err := quiet.Write([]byte(Ping() + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.After(5 * time.Second)
+	for {
+		select {
+		case l := <-obsLines:
+			if IsNotice(l) && strings.Contains(l, "quiet-rider") && strings.Contains(l, "responsive again") {
+				return
+			}
+		case <-deadline:
+			t.Fatal("recovery never announced")
+		}
+	}
+}
+
+func TestHeartbeatingRiderIsNeverFlagged(t *testing.T) {
+	h := NewHub("host", nil)
+	h.QuietAfter = 300 * time.Millisecond
+	lively, _ := testPeer(t, h, "lively")
+	_, obsLines := testPeer(t, h, "observer")
+
+	stop := time.After(1 * time.Second)
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-tick.C:
+			if _, err := lively.Write([]byte(Ping() + "\n")); err != nil {
+				t.Fatal(err)
+			}
+		case l := <-obsLines:
+			// The silent observer itself may be flagged — correct; only
+			// the heartbeating rider must never be.
+			if IsNotice(l) && strings.Contains(l, "unresponsive") && strings.Contains(l, "lively") {
+				t.Fatalf("heartbeating rider flagged: %q", l)
+			}
+		case <-stop:
+			return
+		}
+	}
+}
+
+func TestPingIsConsumedNotRelayed(t *testing.T) {
+	h := NewHub("host", nil)
+	a, _ := testPeer(t, h, "alice")
+	_, bLines := testPeer(t, h, "bob")
+	a.Write([]byte(Ping() + "\n"))
+	a.Write([]byte("real message\n"))
+	if l := recvMessage(t, bLines); l != Message("alice", "real message") {
+		t.Fatalf("bob got %q — a PING leaked onto the feed", l)
+	}
+}

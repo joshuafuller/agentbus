@@ -326,6 +326,16 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 	if err := bus.ClientHello(conn, sc, name, false, key); err != nil {
 		return err
 	}
+	// Heartbeat: silence must mean something is wrong, not that the
+	// rider is idle — every join pings so the hub's liveness monitor
+	// can flag genuinely unresponsive participants (issue #8).
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			sendLine(bus.Ping())
+		}
+	}()
 	// Stdin forwarding starts only AFTER the handshake: a buffered
 	// stdin line sent between HELLO and SIG would be read as handshake
 	// traffic and get the connection refused (PR #20 review, P1).

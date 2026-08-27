@@ -153,6 +153,18 @@ the results wait, redelivered until ACKed, in the driver's own spool.
 Ordering is oldest-first per name in the common case; a redelivered
 envelope can arrive after newer ones (dedup makes this harmless).
 
+### Heartbeat (client → hub)
+
+```
+PING
+```
+
+Consumed by the hub (never relayed): it refreshes the sender's
+last-seen time. `join` pings every 30s. A rider silent past the hub's
+threshold (90s default) is flagged on the feed — `* <name> is
+unresponsive — last seen …` — and its next line announces recovery.
+Deaf is a visible state, not a look-alike of idle (issue #8).
+
 ### Notice (hub → clients)
 
 ```

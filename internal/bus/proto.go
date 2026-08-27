@@ -132,6 +132,14 @@ func ParseAck(line string) (id string, ok bool) {
 	return id, true
 }
 
+// Ping is a client heartbeat (client → hub, consumed, never relayed):
+// it only refreshes the sender's last-seen time so the hub can tell a
+// quiet-but-alive rider from a dead one (issue #8).
+func Ping() string { return "PING" }
+
+// IsPing reports whether a line is a heartbeat.
+func IsPing(line string) bool { return strings.TrimSpace(line) == "PING" }
+
 // Notice formats a system notice line (without newline).
 func Notice(text string) string {
 	return "* " + text
