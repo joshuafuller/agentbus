@@ -125,6 +125,48 @@ func TestBlobReceiverCompletionIsConsumableAfterPublish(t *testing.T) {
 	}
 }
 
+func TestBlobReceiverToleratesRedeliveredChunk(t *testing.T) {
+	r := NewBlobReceiver(t.TempDir(), 0, func(string) {})
+	frames := BlobFrames("transfer-dup", "f.bin", []byte("abcdefgh"), 4)
+	for _, frame := range frames[:2] {
+		if consumed, ok := r.Offer("sender", frame); !consumed || !ok {
+			t.Fatalf("receiver refused initial frame %q", frame)
+		}
+	}
+	if consumed, ok := r.Offer("sender", frames[1]); !consumed || !ok {
+		t.Fatal("receiver refused redelivered chunk")
+	}
+	if !r.TakeDuplicate("transfer-dup") {
+		t.Fatal("redelivered chunk was not identified as a duplicate")
+	}
+	if consumed, ok := r.Offer("sender", frames[2]); !consumed || !ok {
+		t.Fatal("receiver failed to complete after redelivered chunk")
+	}
+	if !r.TakeCompleted("transfer-dup") {
+		t.Fatal("completed transfer was not reported")
+	}
+}
+
+func TestBlobReceiverReportsTerminalRejection(t *testing.T) {
+	r := NewBlobReceiver(t.TempDir(), 1, func(string) {})
+	header := BlobFrames("transfer-reject", "f.bin", []byte("too big"), 4)[0]
+	if consumed, ok := r.Offer("sender", header); !consumed || ok {
+		t.Fatal("over-cap header was not refused")
+	}
+	if !r.TakeRejected("transfer-reject") {
+		t.Fatal("terminal rejection was not reported")
+	}
+	if r.TakeRejected("transfer-reject") {
+		t.Fatal("terminal rejection was not consumed")
+	}
+	if consumed, ok := r.Offer("sender", BlobChunk("transfer-reject", 1, []byte("x"))); !consumed || ok {
+		t.Fatal("chunk after terminal rejection was not swallowed")
+	}
+	if !r.TakeRejected("transfer-reject") {
+		t.Fatal("refused chunk was not reported as terminal")
+	}
+}
+
 func TestBlobReceiverRejectsCorruptTransfer(t *testing.T) {
 	dir := t.TempDir()
 	var notes []string

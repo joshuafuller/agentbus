@@ -143,9 +143,11 @@ type BlobReceiver struct {
 	// sender: "BLOB OK <id>" on success, "BLOB ERR <id> <why>" on
 	// refusal or corruption. It lets `put` block until the bytes have
 	// actually landed instead of racing the connection close.
-	Reply     func(to, line string)
-	open      map[string]*blobXfer
-	completed map[string]struct{}
+	Reply      func(to, line string)
+	open       map[string]*blobXfer
+	completed  map[string]struct{}
+	duplicates map[string]struct{}
+	rejected   map[string]struct{}
 }
 
 // BlobReceipt formats a delivery receipt (receiver → sender).
@@ -187,7 +189,15 @@ func NewBlobReceiver(dir string, maxBytes int64, note func(string)) *BlobReceive
 	if maxBytes <= 0 {
 		maxBytes = defaultBlobCap
 	}
-	return &BlobReceiver{dir: dir, cap: maxBytes, note: note, open: map[string]*blobXfer{}, completed: map[string]struct{}{}}
+	return &BlobReceiver{
+		dir:        dir,
+		cap:        maxBytes,
+		note:       note,
+		open:       map[string]*blobXfer{},
+		completed:  map[string]struct{}{},
+		duplicates: map[string]struct{}{},
+		rejected:   map[string]struct{}{},
+	}
 }
 
 // TakeCompleted reports and clears a transfer that was durably published.
@@ -198,6 +208,26 @@ func (r *BlobReceiver) TakeCompleted(id string) bool {
 		return false
 	}
 	delete(r.completed, id)
+	return true
+}
+
+// TakeDuplicate reports and clears a redelivered frame that was already
+// written. Its envelope can be ACKed without changing the transfer state.
+func (r *BlobReceiver) TakeDuplicate(id string) bool {
+	if _, ok := r.duplicates[id]; !ok {
+		return false
+	}
+	delete(r.duplicates, id)
+	return true
+}
+
+// TakeRejected reports and clears a terminally refused transfer. Its
+// consumed envelopes can be ACKed because retrying cannot make it succeed.
+func (r *BlobReceiver) TakeRejected(id string) bool {
+	if _, ok := r.rejected[id]; !ok {
+		return false
+	}
+	delete(r.rejected, id)
 	return true
 }
 
@@ -221,6 +251,7 @@ func (r *BlobReceiver) start(from string, h BlobHeader) bool {
 	r.open[h.ID] = x
 	if h.Size > r.cap {
 		x.refused = true
+		r.rejected[h.ID] = struct{}{}
 		r.note(fmt.Sprintf("refused a %d-byte file %s from %s — over the %d-byte blob cap", h.Size, h.Name, from, r.cap))
 		r.receipt(x, false, "over-cap")
 		return false
@@ -228,6 +259,7 @@ func (r *BlobReceiver) start(from string, h BlobHeader) bool {
 	part := filepath.Join(r.dir, ".partial")
 	if err := os.MkdirAll(part, 0o700); err != nil {
 		x.refused = true
+		r.rejected[h.ID] = struct{}{}
 		r.note(fmt.Sprintf("could not spool %s from %s: %v", h.Name, from, err))
 		r.receipt(x, false, "spool-error")
 		return false
@@ -235,6 +267,7 @@ func (r *BlobReceiver) start(from string, h BlobHeader) bool {
 	f, err := os.OpenFile(filepath.Join(part, h.ID), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		x.refused = true
+		r.rejected[h.ID] = struct{}{}
 		r.note(fmt.Sprintf("could not spool %s from %s: %v", h.Name, from, err))
 		r.receipt(x, false, "spool-error")
 		return false
@@ -249,9 +282,14 @@ func (r *BlobReceiver) chunk(id string, seq int, data []byte) bool {
 		return false // chunk for a transfer we never saw the header of
 	}
 	if x.refused {
+		r.rejected[id] = struct{}{}
 		return false // already reported; swallow the rest quietly
 	}
-	if seq != x.next || x.got+int64(len(data)) > r.cap {
+	if seq < x.next {
+		r.duplicates[id] = struct{}{}
+		return true
+	}
+	if seq > x.next || x.got+int64(len(data)) > r.cap {
 		return r.abort(x, "corrupt")
 	}
 	x.next++
@@ -269,6 +307,7 @@ func (r *BlobReceiver) chunk(id string, seq int, data []byte) bool {
 // abort discards a transfer's partial file and tells the driver once.
 func (r *BlobReceiver) abort(x *blobXfer, why string) bool {
 	x.refused = true
+	r.rejected[x.hdr.ID] = struct{}{}
 	x.file.Close()
 	os.Remove(filepath.Join(r.dir, ".partial", x.hdr.ID))
 	r.note(fmt.Sprintf("discarded a corrupt transfer of %s from %s (%s)", x.hdr.Name, x.from, why))

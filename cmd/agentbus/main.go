@@ -429,6 +429,15 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 									sendLine(bus.Ack(envelopeID))
 								}
 								delete(blobEnvelopes, blobID)
+							} else if blobs.TakeDuplicate(blobID) {
+								seen.Seen(id)
+								sendLine(bus.Ack(id))
+							} else if blobs.TakeRejected(blobID) {
+								for envelopeID := range pending {
+									seen.Seen(envelopeID)
+									sendLine(bus.Ack(envelopeID))
+								}
+								delete(blobEnvelopes, blobID)
 							}
 						}
 						continue
