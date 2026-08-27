@@ -8,12 +8,19 @@ import (
 	"time"
 )
 
-// drainAll collects every line the spool will hand over.
+// drainAll collects and acknowledges every line the spool will hand
+// over — the Offer+Remove cycle a healthy receiver performs.
 func drainAll(t *testing.T, s *FileSpool, rider string) []string {
 	t.Helper()
 	var lines []string
-	if _, _, err := s.Drain(rider, func(l string) bool { lines = append(lines, l); return true }); err != nil {
+	var ids []string
+	if err := s.Offer(rider, func(id, l string) bool { ids = append(ids, id); lines = append(lines, l); return true }); err != nil {
 		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if err := s.Remove(rider, id); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return lines
 }

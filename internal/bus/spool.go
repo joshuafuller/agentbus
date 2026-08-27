@@ -10,20 +10,14 @@ import (
 	"time"
 )
 
-// Spooler is what the hub needs from a spool: durable per-rider lines,
-// drained in order on rejoin. Drain hands entries oldest-first to
-// accept and removes each entry only AFTER accept returns true; the
-// first false stops the drain and leaves that entry and everything
-// after it spooled. An entry is therefore never deleted before it has
-// been taken for delivery — a drain that outruns the receiver loses
-// nothing (PR #15 review, P1).
+// Spooler is what the hub needs from a spool: durable per-rider
+// lines. Offer feeds entries oldest-first WITHOUT removing them;
+// Remove is the ACK — an entry is never deleted before the receiver
+// durably accepted it (issue #7, ADR 0004).
 type Spooler interface {
 	Add(rider, line string) (id string, err error)
-	// Offer feeds entries oldest-first without removing them; Remove is
-	// the ACK. See FileSpool.Offer / FileSpool.Remove.
 	Offer(rider string, accept func(id, line string) bool) error
 	Remove(rider, id string) error
-	Drain(rider string, accept func(line string) bool) (delivered, remaining int, err error)
 	Pending(rider string) int
 }
 
@@ -107,40 +101,6 @@ func (s *FileSpool) Add(rider, line string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSuffix(name, ".line"), nil
-}
-
-// Drain feeds unexpired spooled lines for a rider to accept, oldest
-// first, removing each file only after accept takes the line. Expired
-// entries are deleted, not offered. The first refusal ends the drain
-// with everything undelivered still on disk.
-func (s *FileSpool) Drain(rider string, accept func(line string) bool) (delivered, remaining int, err error) {
-	rdir, err := s.riderDir(rider)
-	if err != nil {
-		return 0, 0, err
-	}
-	names, err := spoolEntries(rdir)
-	if err != nil {
-		return 0, 0, err
-	}
-	for i, name := range names {
-		path := filepath.Join(rdir, name)
-		if s.expired(name) {
-			os.Remove(path)
-			continue
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return delivered, len(names) - i, err
-		}
-		if !accept(string(data)) {
-			return delivered, len(names) - i, nil
-		}
-		delivered++
-		if err := os.Remove(path); err != nil {
-			return delivered, len(names) - i - 1, err
-		}
-	}
-	return delivered, 0, nil
 }
 
 // Offer feeds unexpired spooled entries to accept, oldest first,
