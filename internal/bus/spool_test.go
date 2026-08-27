@@ -136,7 +136,7 @@ func TestSweepExpiredClearsAbandonedNames(t *testing.T) {
 // restart, which may be never. (PR #15 review.)
 func TestSweepEveryExpiresWhileRunning(t *testing.T) {
 	s := NewFileSpool(t.TempDir(), 40*time.Millisecond)
-	stop := s.SweepEvery(25 * time.Millisecond)
+	stop := s.SweepEvery(25*time.Millisecond, nil)
 	defer stop()
 
 	s.Add("abandoned", "[x] never collected")

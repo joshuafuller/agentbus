@@ -158,32 +158,24 @@ func (h *Hub) Serve(conn net.Conn) {
 	// to the live conn or to the spool this drain will read, never to a
 	// spool nobody drains — and no live line can interleave into the
 	// middle of the catch-up.
-	// Catch-up may exceed one outbox: accept only while headroom
-	// remains (so live traffic enqueued after the drain cannot push the
-	// peer over the drop threshold), and let Drain keep the remainder
-	// on disk — it removes an entry only after we take it, so a drain
-	// that outruns the outbox loses nothing.
-	var drained, left int
+	// Catch-up may exceed one outbox: the first pass runs here (under
+	// the registration lock, so backlog strictly precedes live lines);
+	// any remainder is fed by a background loop as the writer frees
+	// capacity — a rider must never need to reconnect to collect its
+	// own backlog. Drain removes an entry only after we take it, so a
+	// pass that outruns the outbox loses nothing.
+	var left int
 	var drainErr error
 	if !oneshot && h.Spool != nil {
-		drained, left, drainErr = h.Spool.Drain(name, func(l string) bool {
-			if len(me.out) >= outboxDepth-catchUpHeadroom {
-				return false
-			}
-			select {
-			case me.out <- l:
-				return true
-			default:
-				return false
-			}
-		})
+		_, left, drainErr = h.Spool.Drain(name, drainAccept(me))
 	}
 	h.mu.Unlock()
 	if drainErr != nil {
 		h.notice(fmt.Sprintf("spool drain for %s failed: %v", name, drainErr), nil)
 	}
 	if left > 0 {
-		h.notice(fmt.Sprintf("%s caught up %d spooled lines — %d still pending, rejoin to collect the rest", name, drained, left), nil)
+		h.notice(fmt.Sprintf("%s is catching up — %d spooled lines still queued", name, left), nil)
+		go h.catchUp(conn, me, name)
 	}
 	if stale != nil {
 		// Tell the displaced connection why it is going away. Without
@@ -235,6 +227,53 @@ func (h *Hub) Serve(conn net.Conn) {
 	}
 }
 
+// drainAccept bounds one drain pass: at most a headroom's worth of
+// lines per pass and never past the outbox threshold, so the work done
+// under h.mu is bounded regardless of how fast the writer drains
+// (PR #17 review) and live traffic can never push the peer over the
+// slow-consumer drop limit.
+func drainAccept(me peer) func(string) bool {
+	accepted := 0
+	return func(l string) bool {
+		if accepted >= outboxDepth-catchUpHeadroom || len(me.out) >= outboxDepth-catchUpHeadroom {
+			return false
+		}
+		select {
+		case me.out <- l:
+			accepted++
+			return true
+		default:
+			return false
+		}
+	}
+}
+
+// catchUp keeps feeding a rider's remaining backlog as its writer
+// frees outbox capacity, until the spool is empty or the peer leaves.
+// Each pass holds h.mu only for one bounded drain, and deliver()
+// routes new addressed lines for this name into the spool while a
+// backlog exists, so old-before-new ordering holds throughout.
+func (h *Hub) catchUp(conn net.Conn, me peer, name string) {
+	for {
+		h.mu.Lock()
+		if _, ok := h.peers[conn]; !ok {
+			h.mu.Unlock()
+			return
+		}
+		_, left, err := h.Spool.Drain(name, drainAccept(me))
+		h.mu.Unlock()
+		if err != nil {
+			h.notice(fmt.Sprintf("spool drain for %s failed: %v", name, err), nil)
+			return
+		}
+		if left == 0 {
+			h.notice(fmt.Sprintf("%s is caught up", name), nil)
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // Broadcast sends a message line from the host itself to all peers.
 func (h *Hub) Broadcast(text string) {
 	h.deliver(h.name, text, nil)
@@ -264,8 +303,13 @@ func (h *Hub) deliver(from, text string, via net.Conn) {
 		delivered := 0
 		var spoolNotice string
 		h.mu.Lock()
+		// While a backlog exists for this name, live lines join the END
+		// of the spool instead of the outbox: older spooled lines must
+		// execute before newer live ones (PR #17 review). The catch-up
+		// loop will deliver them in order.
+		backlog := h.Spool != nil && to != h.name && h.Spool.Pending(to) > 0
 		for conn, p := range h.peers {
-			if p.oneshot || p.name != to || conn == via {
+			if backlog || p.oneshot || p.name != to || conn == via {
 				continue
 			}
 			enqueue(conn, p, line)
@@ -275,7 +319,14 @@ func (h *Hub) deliver(from, text string, via net.Conn) {
 			// The host is always present; its sink is its delivery.
 			delivered++
 		}
-		if delivered == 0 {
+		if delivered == 0 && backlog {
+			// Not absence — ordering: the line joins the back of the
+			// queue the catch-up loop is already delivering. No notice
+			// per line; the catching-up/caught-up notices bracket it.
+			if err := h.Spool.Add(to, line); err != nil {
+				spoolNotice = fmt.Sprintf("could not queue for %s: %v — line lost", to, err)
+			}
+		} else if delivered == 0 {
 			// Nobody holds that name. Spool for its return, or at least
 			// name the loss — a silent drop is the failure mode this
 			// project exists to kill (issue #8, ADR 0004). The spool add

@@ -210,7 +210,9 @@ func runHost(name, onMsg string, sink *bus.Sink) error {
 		// A host serves indefinitely: sweep hourly (and once now) so
 		// entries for names that never rejoin cannot outlive the TTL
 		// until a restart that may never come.
-		defer spool.SweepEvery(time.Hour)()
+		defer spool.SweepEvery(time.Hour, func(err error) {
+			fmt.Fprintf(os.Stderr, "agentbus: spool sweep: %v\n", err)
+		})()
 		hub.Spool = spool
 	} else {
 		fmt.Fprintf(os.Stderr, "agentbus: no home dir (%v) — offline spool disabled\n", err)

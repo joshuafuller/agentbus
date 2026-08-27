@@ -78,8 +78,15 @@ type Rider struct {
 	Runner func(prompt string) (string, error) // the wake path (--on-msg)
 	Send   func(line string)                   // writes one line to the bus
 
-	once  sync.Once
-	queue chan queuedTask
+	once    sync.Once
+	queue   chan queuedTask
+	rejects chan rejection
+}
+
+type rejection struct {
+	from  string
+	msg   *a2a.Message
+	cause string
 }
 
 type queuedTask struct {
@@ -102,20 +109,35 @@ func (r *Rider) Handle(from, payload string) bool {
 	}
 	r.once.Do(func() {
 		r.queue = make(chan queuedTask, taskQueueDepth)
+		r.rejects = make(chan rejection, taskQueueDepth)
 		go func() {
 			for q := range r.queue {
 				r.run(q.from, q.msg)
+			}
+		}()
+		// Rejections get their own worker: reject writes to disk and
+		// the network, and doing that on the caller — the join read
+		// loop — would stop the rider from reading the bus at exactly
+		// the moment it is overloaded (PR #17 review).
+		go func() {
+			for rej := range r.rejects {
+				r.reject(rej.from, rej.msg, rej.cause)
 			}
 		}()
 	})
 	select {
 	case r.queue <- queuedTask{from: from, msg: msg}:
 	default:
-		// Queue full: refuse VISIBLY. The requester gets a terminal
-		// REJECTED snapshot right now instead of waiting out its
-		// timeout on a task this rider deliberately discarded
-		// (PR #15 review).
-		r.reject(from, msg, "rider task queue full ("+fmt.Sprint(taskQueueDepth)+" pending)")
+		// Queue full: refuse VISIBLY — the requester gets a terminal
+		// REJECTED snapshot instead of waiting out its timeout
+		// (PR #15 review). If even the rejection queue is full, the
+		// task is dropped: the requester's timeout is then the truthful
+		// signal that this rider is overwhelmed.
+		select {
+		case r.rejects <- rejection{from: from, msg: msg,
+			cause: "rider task queue full (" + fmt.Sprint(taskQueueDepth) + " pending)"}:
+		default:
+		}
 	}
 	return true
 }

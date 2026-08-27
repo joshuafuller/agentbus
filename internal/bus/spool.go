@@ -153,17 +153,24 @@ func (s *FileSpool) Pending(rider string) int {
 // until the returned stop function is called. A host serves
 // indefinitely, so a startup-only sweep would let entries for
 // never-returning names outlive the TTL until the next restart —
-// which may be never (PR #15 review).
-func (s *FileSpool) SweepEvery(interval time.Duration) (stop func()) {
+// which may be never (PR #15 review). onErr, if non-nil, receives
+// every sweep failure: silent sweep failure means silent loss of TTL
+// enforcement (PR #17 review).
+func (s *FileSpool) SweepEvery(interval time.Duration, onErr func(error)) (stop func()) {
+	sweep := func() {
+		if err := s.SweepExpired(); err != nil && onErr != nil {
+			onErr(err)
+		}
+	}
 	done := make(chan struct{})
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
-		s.SweepExpired()
+		sweep()
 		for {
 			select {
 			case <-t.C:
-				s.SweepExpired()
+				sweep()
 			case <-done:
 				return
 			}

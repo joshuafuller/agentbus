@@ -222,6 +222,38 @@ func TestRiderRejectsWhenQueueFull(t *testing.T) {
 	}
 }
 
+// Overflow rejection must not run on the caller (the join read loop):
+// it writes to disk and to the network, and a blocking Send there
+// would stop the rider from reading the bus at exactly the moment it
+// is overloaded. (PR #17 review, P1.)
+func TestRejectDoesNotBlockTheCaller(t *testing.T) {
+	block := make(chan struct{})
+	defer close(block)
+	blockingSend := make(chan string) // unbuffered, nobody reads: Send blocks
+	r := &Rider{
+		Dir:    t.TempDir(),
+		Runner: func(string) (string, error) { <-block; return "ok", nil },
+		Send: func(line string) {
+			select {
+			case blockingSend <- line:
+			case <-block:
+			}
+		},
+	}
+	// Fill: one running + full queue.
+	for i := 0; i < taskQueueDepth+1; i++ {
+		msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("t"))
+		r.Handle("alice", EncodeMessage(msg))
+	}
+	// The overflow task: Handle must return fast even though Send blocks.
+	start := time.Now()
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("overflow"))
+	r.Handle("alice", EncodeMessage(msg))
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Fatalf("overflow Handle blocked the read loop for %v", d)
+	}
+}
+
 func TestRiderIgnoresChatLines(t *testing.T) {
 	r := &Rider{Dir: t.TempDir(), Runner: nil, Send: func(string) { t.Fatal("sent") }}
 	if r.Handle("alice", "just chatting") {
