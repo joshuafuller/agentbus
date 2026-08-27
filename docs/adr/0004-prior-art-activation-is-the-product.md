@@ -33,9 +33,10 @@ Payload encryption whose decrypt function has zero callers; agent cards that
 are never signed; a skill registry that accepts registrations from anyone
 with no authentication; ACL rules keyed on a DID field that inbound traffic
 never populates; and — worst — "enterprise" OIDC/SPIFFE identity that derives
-the Ed25519 *private key* from public strings. Its daemon also ACKs a task
-and then silently drops it if no agent process is subscribed, so the sender
-believes delivery succeeded — our issue #8's deaf-rider failure, built into
+the Ed25519 *private key* from public strings. Its daemon also ACKs every
+parsed envelope unconditionally, then drops the executor notification if no
+agent process is subscribed — the task strands in `SUBMITTED` forever while
+the sender holds an ACK — our issue #8's deaf-rider failure, built into
 the protocol. It hand-rolled a pre-v1 "A2A" (spec 0.3, invented field names,
 one method implemented, results unfetchable, no push notifications) because
 when it was built the official Go SDK offered no seam between A2A types and a
