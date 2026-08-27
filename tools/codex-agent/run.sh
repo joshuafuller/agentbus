@@ -9,7 +9,8 @@
 # until stopped from outside (docker stop <container>). Containers are
 # named agentbus-agent-<branch> so they are easy to find and stop.
 #
-# Needs: docker, a logged-in gh on the host (token is minted per run),
+# Needs: docker, a logged-in gh on the host (the host token is read and passed
+# through for each run),
 # and ~/.codex/auth.json + config.toml (seeded read-only into the run).
 set -euo pipefail
 
