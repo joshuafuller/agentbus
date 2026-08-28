@@ -155,6 +155,25 @@ func TestBlobReceiverToleratesRedeliveredChunk(t *testing.T) {
 	}
 }
 
+func TestBlobReceiverToleratesRedeliveredHeader(t *testing.T) {
+	r := NewBlobReceiver(t.TempDir(), 0, func(string) {})
+	frames := BlobFrames("header-dup", "f.bin", []byte("abcdefgh"), 4)
+	for _, frame := range frames[:2] {
+		if consumed, ok := r.Offer("sender", frame); !consumed || !ok {
+			t.Fatalf("receiver refused initial frame %q", frame)
+		}
+	}
+	if consumed, ok := r.Offer("sender", frames[0]); !consumed || !ok {
+		t.Fatal("receiver refused redelivered header")
+	}
+	if consumed, ok := r.Offer("sender", frames[2]); !consumed || !ok {
+		t.Fatal("receiver failed to complete after redelivered header")
+	}
+	if !r.TakeCompleted("header-dup") {
+		t.Fatal("completed transfer was not reported")
+	}
+}
+
 func TestBlobReceiverReportsTerminalRejection(t *testing.T) {
 	r := NewBlobReceiver(t.TempDir(), 1, func(string) {})
 	header := BlobFrames("transfer-reject", "f.bin", []byte("too big"), 4)[0]

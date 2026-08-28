@@ -249,6 +249,9 @@ func (r *BlobReceiver) Offer(from, payload string) (consumed, ok bool) {
 }
 
 func (r *BlobReceiver) start(from string, h BlobHeader) bool {
+	if existing, ok := r.open[h.ID]; ok && !existing.refused && existing.hdr == h {
+		return true // retransmitted header; preserve progress and the open file
+	}
 	x := &blobXfer{hdr: h, from: from, sum: sha256.New(), next: 1}
 	r.open[h.ID] = x
 	if h.Size > r.cap {
