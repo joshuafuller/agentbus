@@ -238,3 +238,71 @@ func TestClientHelloHandshake(t *testing.T) {
 		t.Fatalf("legacy hello got %q", sc3.Text())
 	}
 }
+
+// TestWrongKeyAttackerIsNotRegistered guards the auth bypass the Serve
+// decomposition briefly introduced (a refused wrong-key join that was
+// still registered = full impersonation of a bound name). A refusal
+// NOTICE is not enough: the attacker's connection must be closed and it
+// must never become a peer that can receive traffic under the bound
+// name. This asserts exactly that — the attacker receives no broadcast —
+// so the invariant survives any future refactor of the handshake.
+func TestWrongKeyAttackerIsNotRegistered(t *testing.T) {
+	h := NewHub("host", nil)
+	key := newKey(t)
+	_, legitLines, err := keyedPeer(t, h, "codex-luna", key, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Attacker: a VALID signature, but for a DIFFERENT key than the bound one.
+	attacker := newKey(t)
+	ac, as := net.Pipe()
+	t.Cleanup(func() { ac.Close() })
+	go h.Serve(as)
+	ac.SetDeadline(time.Now().Add(3 * time.Second))
+	ac.Write([]byte(HelloKeyed("codex-luna", false, PubOf(attacker)) + "\n"))
+	abr := bufio.NewReader(ac)
+	chal, _ := abr.ReadString('\n')
+	nonce, ok := ParseChallenge(strings.TrimSpace(chal))
+	if !ok {
+		t.Fatalf("expected challenge, got %q", chal)
+	}
+	ac.Write([]byte(SigLine(SignChallenge(attacker, nonce, "codex-luna")) + "\n"))
+
+	// A third rider broadcasts. A registered peer would receive it.
+	other, _ := testPeer(t, h, "alice")
+	const marker = "BROADCAST-MARKER-9f2a1c"
+	other.Write([]byte(marker + "\n"))
+
+	// The legitimate rider must receive it (proves the broadcast happened).
+	got := false
+	for !got {
+		select {
+		case l, open := <-legitLines:
+			if !open {
+				t.Fatal("legitimate rider was displaced by the refused attacker")
+			}
+			if strings.Contains(l, marker) {
+				got = true
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("legit rider never received the broadcast")
+		}
+	}
+
+	// The attacker must NOT receive it: its connection is closed after the
+	// refusal, so the read hits the refusal notice then EOF — never the marker.
+	ac.SetDeadline(time.Now().Add(500 * time.Millisecond))
+	for {
+		l, err := abr.ReadString('\n')
+		if err != nil {
+			break // connection closed — correct
+		}
+		if strings.Contains(l, marker) {
+			t.Fatal("wrong-key attacker received broadcast traffic — registered as a peer (AUTH BYPASS)")
+		}
+		if strings.Contains(l, "welcome aboard") {
+			t.Fatal("wrong-key attacker got a welcome — registered under a bound name (AUTH BYPASS)")
+		}
+	}
+}
