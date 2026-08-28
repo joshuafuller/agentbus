@@ -393,6 +393,12 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 		}
 		from, body, isMsg := bus.ParseMessage(line)
 		if isMsg {
+			// Blob frames may arrive directly from a no-envelope
+			// delivery path. Let the blob receiver claim them before the
+			// envelope-specific task and chat handling below.
+			if _, _, enveloped := bus.ParseEnvelope(body); !enveloped && offerUnwrappedBlob(blobs, from, body) {
+				continue
+			}
 			if id, payload, isEnv := bus.ParseEnvelope(body); isEnv {
 				if rider != nil {
 					if _, isTask := task.DecodeMessage(payload); isTask {
@@ -509,6 +515,22 @@ func blobFrameID(payload string) string {
 		return id
 	}
 	return ""
+}
+
+func offerUnwrappedBlob(blobs *bus.BlobReceiver, from, payload string) bool {
+	if blobs == nil {
+		return false
+	}
+	consumed, _ := blobs.Offer(from, payload)
+	if !consumed {
+		return false
+	}
+	if blobID := blobFrameID(payload); blobID != "" {
+		blobs.TakeCompleted(blobID)
+		blobs.TakeDuplicate(blobID)
+		blobs.TakeRejected(blobID)
+	}
+	return true
 }
 
 func runSend(ticket, name, msg string) error {

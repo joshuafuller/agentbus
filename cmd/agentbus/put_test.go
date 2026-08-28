@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"os"
 	"path/filepath"
@@ -188,6 +190,21 @@ func TestPutReportsClosedConnectionBeforeWelcome(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "connection closed before welcome") {
 		t.Fatalf("closed connection message = %q", out.String())
+	}
+}
+
+func TestOfferUnwrappedBlobFrame(t *testing.T) {
+	dir := t.TempDir()
+	r := bus.NewBlobReceiver(dir, 0, func(string) {})
+	frames := bus.BlobFrames("unwrapped", "f.bin", []byte("data"), 4)
+	for _, frame := range frames {
+		if !offerUnwrappedBlob(r, "sender", frame) {
+			t.Fatalf("unwrapped blob frame was not consumed: %q", frame)
+		}
+	}
+	sum := sha256.Sum256([]byte("data"))
+	if _, err := os.Stat(filepath.Join(dir, hex.EncodeToString(sum[:])[:8]+"-f.bin")); err != nil {
+		t.Fatalf("unwrapped blob was not published: %v", err)
 	}
 }
 
