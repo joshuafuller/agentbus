@@ -170,10 +170,12 @@ func (h *Hub) Serve(conn net.Conn) {
 // registration, so a refused connection never displaces the
 // legitimate holder and the direct writes below race nothing. Three
 // cases:
-//   keyed hello  → fresh-nonce challenge; the signature must verify
-//                  and, if the name is bound, the key must match.
-//   unkeyed, name bound → refused: the name belongs to a key now.
-//   unkeyed, unbound    → legacy path, unchanged.
+//
+//	keyed hello  → fresh-nonce challenge; the signature must verify
+//	               and, if the name is bound, the key must match.
+//	unkeyed, name bound → refused: the name belongs to a key now.
+//	unkeyed, unbound    → legacy path, unchanged.
+//
 // It reports whether the connection may proceed to registration.
 func (h *Hub) handshake(conn net.Conn, sc *bufio.Scanner, name string, oneshot bool, pub ed25519.PublicKey) bool {
 	if pub == nil {
