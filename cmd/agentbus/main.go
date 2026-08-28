@@ -12,6 +12,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -39,7 +40,10 @@ const usage = `agentbus — a message bus for AI agents. One ticket, any number 
 
 Usage:
   agentbus host [flags]                 start a bus, print its ticket
-  agentbus join <ticket> [flags]        ride the bus (stays connected)
+                                        (the ticket survives restarts;
+                                        rotate with --new-ticket)
+  agentbus join <ticket> [flags]        ride the bus (stays connected,
+                                        reconnects with backoff)
   agentbus send <ticket> [flags] <msg>  send one message and exit
   agentbus version                      print version information
   agentbus task <ticket> <rider> <msg>  send an A2A task to one rider and
@@ -95,9 +99,10 @@ func main() {
 	var err error
 	switch cmd {
 	case "host":
+		newTicket := fs.Bool("new-ticket", false, "mint a fresh ticket and reset TOFU bindings instead of resuming the saved identity")
 		fs.Parse(args)
 		validateName()
-		err = runHost(*name, *onMsg, sinkFor(*inbox, *onMsg))
+		err = runHost(*name, *onMsg, *newTicket, sinkFor(*inbox, *onMsg))
 	case "join":
 		ticket, rest := popTicket(args)
 		fs.Parse(rest)
@@ -208,7 +213,7 @@ func logf() func(string, ...any) {
 	return func(string, ...any) {}
 }
 
-func runHost(name, onMsg string, sink *bus.Sink) error {
+func runHost(name, onMsg string, newTicket bool, sink *bus.Sink) error {
 	// With --on-msg the host is a rider like any other: tasks addressed
 	// to it run the lifecycle, with results broadcast back as addressed
 	// lines. Without it the host is a driver and hostSink renders task
@@ -239,6 +244,32 @@ func runHost(name, onMsg string, sink *bus.Sink) error {
 	}
 	hub = bus.NewHub(name, hostSink(hostRider, sink.Deliver,
 		func(id string) { hub.AckLocal(id) }, bus.NewDedup(1024), blobs))
+
+	// Restart-surviving host state (#34): the ticket resumes from the
+	// saved identity, and TOFU bindings reload so a restart cannot
+	// re-open the trust-on-first-use window for known rider names.
+	stateDir, stateErr := hostStateDir()
+	var identity *tailcat.PrivateKey
+	if stateErr == nil {
+		if newTicket {
+			if err := resetHostState(stateDir); err != nil {
+				return fmt.Errorf("--new-ticket: %w", err)
+			}
+		}
+		identity, err = loadHostIdentity(stateDir)
+		if err != nil {
+			return err
+		}
+		if err := hub.PersistBindings(filepath.Join(stateDir, hostTOFUFile)); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "agentbus: no home dir (%v) — ticket and TOFU bindings will not survive a restart\n", stateErr)
+	}
+	resumed := identity != nil
+	if identity == nil {
+		identity = tailcat.NewPrivateKey()
+	}
 	if blobs != nil {
 		// Host-local blob receipts must be addressed back to the put
 		// requester, just like receipts from a remote join.
@@ -267,6 +298,7 @@ func runHost(name, onMsg string, sink *bus.Sink) error {
 		fmt.Fprintf(os.Stderr, "agentbus: no home dir (%v) — offline spool disabled\n", err)
 	}
 	srv := &tailcat.Server{
+		Key:  identity.Private,
 		Logf: logf(),
 		OnTCP: func(port uint16) func(net.Conn) {
 			if port != busPort {
@@ -275,13 +307,39 @@ func runHost(name, onMsg string, sink *bus.Sink) error {
 			return func(c net.Conn) { hub.Serve(c) }
 		},
 	}
+	if resumed {
+		// The saved DERP region must be reused, or the same key would
+		// mint a DIFFERENT ticket and riders holding the old one would
+		// bootstrap via a relay nobody listens on.
+		if len(identity.Public.Region) > 0 {
+			srv.Region = identity.Public.Region[0]
+		} else if identity.Public.RegionID != 0 {
+			srv.RegionID = identity.Public.RegionID
+		}
+	}
 	if err := srv.Start(); err != nil {
 		return err
 	}
 	defer srv.Close()
 
 	ticket := srv.ConnBlob()
-	fmt.Printf("🚌 the bus is running. your ticket:\n\n  %s\n\n", ticket)
+	if !resumed && stateErr == nil {
+		// First start: persist the identity (key + the region Start
+		// picked) so the NEXT start resumes this exact ticket.
+		if ci, perr := tailcat.ParseConnBlob(ticket); perr == nil {
+			identity.Public = ci
+			if serr := saveHostIdentity(stateDir, identity); serr != nil {
+				fmt.Fprintf(os.Stderr, "agentbus: could not save the host identity (%v) — this ticket will not survive a restart\n", serr)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "agentbus: could not parse own ticket (%v) — this ticket will not survive a restart\n", perr)
+		}
+	}
+	if resumed {
+		fmt.Printf("🚌 the bus is running (resumed saved identity — same ticket as last run; rotate with --new-ticket). your ticket:\n\n  %s\n\n", ticket)
+	} else {
+		fmt.Printf("🚌 the bus is running. your ticket:\n\n  %s\n\n", ticket)
+	}
 	fmt.Printf("riders join with:    agentbus join <ticket> --name <who>\n")
 	fmt.Printf("onboard a fresh agent: agentbus invite %s --name <who>\n\n", ticket)
 
@@ -324,12 +382,72 @@ func blobReceiverAt(home string, deliver func(string) bool) (*bus.BlobReceiver, 
 	return blobs, nil
 }
 
-func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
-	conn, err := dial(ticket)
-	if err != nil {
-		return err
+// errJoinPermanent marks a session end no reconnect can fix: the name
+// was refused (bound to a different key) or this connection was
+// displaced by a newer join under the same name. Retrying a displaced
+// join would displace the displacer — two auto-reconnecting joins
+// fighting over one name forever.
+var errJoinPermanent = fmt.Errorf("permanent")
+
+// reconnectWriter hands lines to the current session's conn writer and
+// queues lines produced while no session is live — a task worker
+// finishing mid-reconnect must not write its terminal snapshot to a
+// dead socket and lose it (PR #48 review, P1). Queued lines flush, in
+// order, when the next session attaches. Writers report errors, and a
+// FAILED write re-queues the line instead of dropping it — the send-
+// vs-detach race the #49 review found: Send could copy the old writer,
+// lose w.mu, write to the just-closed socket, and the ignored error
+// left the line neither delivered nor queued.
+type reconnectWriter struct {
+	mu      sync.Mutex
+	current func(string) error
+	gen     int // bumped by every Attach; detects a changed world
+	pending []string
+}
+
+// Send writes through the live session. A failed or writer-less send
+// queues the line for the next attach — unless a NEW session attached
+// meanwhile (gen moved), in which case it retries through that one.
+func (w *reconnectWriter) Send(line string) {
+	for {
+		w.mu.Lock()
+		f, gen := w.current, w.gen
+		w.mu.Unlock()
+		if f != nil && f(line) == nil {
+			return
+		}
+		w.mu.Lock()
+		if w.gen == gen {
+			w.pending = append(w.pending, line)
+			w.mu.Unlock()
+			return
+		}
+		w.mu.Unlock() // the world changed mid-send: retry against it
 	}
-	defer conn.Close()
+}
+
+// Attach makes f the live writer and flushes everything queued while
+// disconnected, oldest first (a flush failure re-queues via Send).
+// Attach(nil) detaches: queueing resumes.
+func (w *reconnectWriter) Attach(f func(string) error) {
+	w.mu.Lock()
+	w.current = f
+	w.gen++
+	var p []string
+	if f != nil {
+		p, w.pending = w.pending, nil
+	}
+	w.mu.Unlock()
+	for _, line := range p {
+		w.Send(line)
+	}
+}
+
+// runJoin keeps a rider on the bus across disconnects (#34): a host
+// restart resumes the same ticket, so the right rider behavior is to
+// redial with backoff, not to die and leave a deaf agent. Only a
+// permanent end (refused name, displaced by a newer join) exits.
+func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 	// Every join is keyed (issue #6): the first join under a name binds
 	// it (TOFU) and every later connection must prove the same key.
 	rdir, err := riderDir(name)
@@ -341,21 +459,23 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 		return err
 	}
 
-	// The conn is written from stdin forwarding, and — when this join
-	// is a wired rider — from task goroutines reporting state. Guard it
-	// so concurrent lines never interleave mid-line.
-	var writeMu sync.Mutex
-	sendLine := func(line string) {
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		fmt.Fprintf(conn, "%s\n", line)
-	}
+	// One writer outlives every session: stdin lines and task-worker
+	// output follow the live connection, and worker lines produced
+	// mid-reconnect queue instead of dying with the old socket.
+	w := &reconnectWriter{}
+	go func() {
+		sc := bufio.NewScanner(os.Stdin)
+		for sc.Scan() {
+			if t := strings.TrimSpace(sc.Text()); t != "" {
+				w.Send(t)
+			}
+		}
+	}()
 
-	// A join with a wake command is a rider: A2A task requests are
-	// claimed here and run through the task lifecycle instead of the
-	// plain sink, with stdout as the result. Joins without --on-msg
-	// (humans on --inbox) leave task traffic to the sink, visible as
-	// ordinary lines.
+	// The task rider is created ONCE and survives session retries: its
+	// workers hold Send/Acked closures, and per-session closures would
+	// bind a running task's DONE snapshot to a connection that no
+	// longer exists (PR #48 review, P1).
 	var rider *task.Rider
 	if onMsg != "" {
 		home, err := os.UserHomeDir()
@@ -366,17 +486,80 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		rider = &task.Rider{Dir: dir, Runner: execRunner(onMsg), Send: sendLine,
+		rider = &task.Rider{Dir: dir, Runner: execRunner(onMsg), Send: w.Send,
 			// ACK a task envelope only once its SUBMITTED snapshot is
 			// on disk — the hub then forgets its spooled copy.
-			Acked: func(id string) { sendLine(bus.Ack(id)) }}
+			Acked: func(id string) { w.Send(bus.Ack(id)) }}
 	}
+
+	backoff := time.Second
+	for {
+		start := time.Now()
+		err := joinSession(ticket, name, sink, key, rider, w)
+		w.Attach(nil)
+		if errors.Is(err, errJoinPermanent) {
+			return err
+		}
+		// A session that held for a while earns a fresh backoff; only
+		// immediate failures escalate toward the 30s ceiling.
+		if time.Since(start) > 30*time.Second {
+			backoff = time.Second
+		}
+		fmt.Fprintf(os.Stderr, "agentbus: %v — reconnecting in %s (a restarted host keeps its ticket)\n", err, backoff)
+		time.Sleep(backoff)
+		if backoff *= 2; backoff > 30*time.Second {
+			backoff = 30 * time.Second
+		}
+	}
+}
+
+// permanentNotice classifies hub notices that end this name's story on
+// this connection for good: a handshake refusal ("* refused — ..." is
+// written only to the refused conn) and a displacement (a newer join
+// took the name). Reconnecting after either would be wrong — a
+// displaced join retrying would displace the displacer, forever.
+func permanentNotice(line string) (reason string, permanent bool) {
+	if strings.HasPrefix(line, "* refused — ") || strings.HasPrefix(line, "* displaced — ") {
+		return strings.TrimPrefix(line, "* "), true
+	}
+	return "", false
+}
+
+// joinSession runs one connection's lifetime: dial, handshake, relay
+// until the conn dies. It attaches its conn writer to w so stdin
+// forwarding and task-worker output follow the live connection; the
+// rider (nil for driver joins) outlives the session — see runJoin.
+func joinSession(ticket, name string, sink *bus.Sink, key ed25519.PrivateKey, rider *task.Rider, w *reconnectWriter) error {
+	conn, err := dial(ticket)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	// The conn is written from stdin forwarding, and — when this join
+	// is a wired rider — from task goroutines reporting state. Guard it
+	// so concurrent lines never interleave mid-line. The error matters:
+	// a failed write through the reconnectWriter re-queues the line for
+	// the next session instead of losing it (#49 review, P1).
+	var writeMu sync.Mutex
+	sendLineErr := func(line string) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_, err := fmt.Fprintf(conn, "%s\n", line)
+		return err
+	}
+	sendLine := func(line string) { sendLineErr(line) }
 
 	sc := bufio.NewScanner(conn)
 	// The hub accepts lines up to 256KB; the default 64KB token limit
 	// would fail a legitimate large task line (PR #20 review). Must be
 	// set before the scanner's first Scan.
 	sc.Buffer(make([]byte, 0, 64*1024), 256*1024)
+	// A host that dies silently right after the dial would park
+	// ClientHello on a read forever — exactly the failure the reconnect
+	// loop exists for, so the handshake reads get a deadline too
+	// (PR #48 review). Cleared or re-armed in the loop below.
+	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	if err := bus.ClientHello(conn, sc, name, false, key); err != nil {
 		return err
 	}
@@ -384,24 +567,28 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 	// rider is idle — every join pings so the hub's liveness monitor
 	// can flag genuinely unresponsive participants (issue #8).
 	interval := heartbeatEvery
+	hbStop := make(chan struct{})
+	defer close(hbStop)
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
-		for range t.C {
-			sendLine(bus.Ping())
-		}
-	}()
-	// Stdin forwarding starts only AFTER the handshake: a buffered
-	// stdin line sent between HELLO and SIG would be read as handshake
-	// traffic and get the connection refused (PR #20 review, P1).
-	go func() {
-		sc := bufio.NewScanner(os.Stdin)
-		for sc.Scan() {
-			if t := strings.TrimSpace(sc.Text()); t != "" {
-				sendLine(t)
+		for {
+			select {
+			case <-t.C:
+				sendLine(bus.Ping())
+			case <-hbStop:
+				return
 			}
 		}
 	}()
+	// The shared writer attaches only AFTER the handshake: a buffered
+	// stdin line sent between HELLO and SIG would be read as handshake
+	// traffic and get the connection refused (PR #20 review, P1).
+	// Attaching also flushes task output queued during the disconnect.
+	w.Attach(sendLineErr)
+	// Probe immediately: the first PONG proves this host answers
+	// heartbeats, which arms the liveness deadline below.
+	sendLine(bus.Ping())
 	// Blob transfers (issue #2) reassemble into a content-addressed
 	// spool; the agent gets one FILE notice per file, never the bytes.
 	var blobs *bus.BlobReceiver
@@ -420,10 +607,36 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 	// remember recent ids and re-ACK duplicates without reprocessing.
 	seen := bus.NewDedup(1024)
 	blobEnvelopes := map[string]map[string]struct{}{}
+	// Host liveness (#34): every heartbeat is answered with a PONG, so
+	// a healthy connection is never quiet for a full heartbeat interval.
+	// A host that died without a FIN (process killed, machine gone)
+	// leaves the read blocked forever — the deadline turns that silence
+	// into a session end, and the reconnect loop takes it from there.
+	// The deadline arms only once the FIRST PONG proves this host
+	// answers heartbeats: against an older no-PONG host an unconditional
+	// deadline would bounce a healthy idle rider every cycle
+	// (PR #48 review). Old hosts keep the old block-forever behavior.
+	liveness := 3 * heartbeatEvery
+	armed := false
 	for sc.Scan() {
 		line := sc.Text()
+		if bus.IsPong(line) {
+			armed = true
+			conn.SetReadDeadline(time.Now().Add(liveness))
+			continue // heartbeat reply: liveness bookkeeping only
+		}
+		if armed {
+			conn.SetReadDeadline(time.Now().Add(liveness))
+		} else {
+			// Handshake deadline done its job (the welcome arrived);
+			// no liveness contract with this host yet.
+			conn.SetReadDeadline(time.Time{})
+		}
 		if bus.IsNotice(line) {
 			fmt.Println(line) // visible to humans, never delivered to agents
+			if reason, permanent := permanentNotice(line); permanent {
+				return fmt.Errorf("%s: %w", reason, errJoinPermanent)
+			}
 			continue
 		}
 		from, body, isMsg := bus.ParseMessage(line)

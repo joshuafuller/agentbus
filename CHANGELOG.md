@@ -7,6 +7,21 @@ CLI, wire format, and APIs may change without notice.
 ## [Unreleased]
 
 ### Added
+- `send --to <rider>`: addressed sends from the CLI ride the durable spool
+  (24h TTL, at-least-once, receiver dedup) and wait for the hub's
+  SENT-OK/SENT-ERR receipt — a fire-and-forget TASK can no longer vanish
+  into a dead rider or a full spool disk unnoticed (#33, PR #47).
+- Host identity persists (`~/.agentbus/host/identity.json`): a restarted
+  host resumes the SAME ticket, so riders and boarding passes survive an
+  in-place upgrade; rotation is explicit via `host --new-ticket` (#34).
+- TOFU bindings persist across host restarts (`~/.agentbus/host/tofu.json`);
+  a restart is no longer a trust reset (#34).
+- `join` auto-reconnects with backoff; the hub answers PING with PONG and
+  the rider arms a read deadline once PONG support is proven, so a silently
+  dead host is detected instead of leaving a deaf rider blocked on read
+  forever (#34).
+- BOARDING.md: reaper-proof detached-join guidance (setsid and its macOS
+  alternatives) plus a PID-specific aliveness check (#32, PR #46).
 - `docs/ARCHITECTURE.md`, `docs/PROTOCOL.md`, `CONTRIBUTING.md`, `Makefile`.
 - `SECURITY.md` whole-project threat model (T1–T8).
 - MIT license.

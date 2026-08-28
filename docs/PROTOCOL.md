@@ -41,14 +41,21 @@ signature>` over the domain-separated transcript
 joined by NUL (`0x00`) bytes, not concatenated directly) — fresh per
 connection, so a
 captured signature cannot be replayed. The first RIDER to prove a key
-under a name **binds** it (trust on first use, for the life of the
-bus, announced on the feed); afterwards every connection under that
-name — one-shot senders included — must prove the same key or is
-refused with a visible notice. Names never claimed by a key keep
-working unkeyed. `join` always presents a key (created on first use at
+under a name **binds** it (trust on first use, announced on the feed);
+afterwards every connection under that name — one-shot senders
+included — must prove the same key or is refused with a visible
+notice. Names never claimed by a key keep working unkeyed. `join`
+always presents a key (created on first use at
 `~/.agentbus/rider-<name>/id_ed25519`, 0600); `send` and `task`
-present the name's key when the caller holds it. A rider that loses
-its key cannot reclaim its name until the bus restarts.
+present the name's key when the caller holds it.
+
+Bindings **persist across host restarts** (#34): the hub saves the
+TOFU table to `~/.agentbus/host/tofu.json` (0600) on every bind and
+reloads it on start, so a restart — now an in-place upgrade that keeps
+the same ticket — cannot re-open the trust-on-first-use window for a
+known name. A rider that loses its key cannot reclaim its name until
+the operator rotates the bus with `agentbus host --new-ticket`, which
+wipes the identity and the bindings together.
 
 The hub replies with a welcome notice; reading it confirms registration
 (so a sender can safely write immediately after):

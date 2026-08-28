@@ -47,7 +47,7 @@ Two parties are outside your control:
 | T4 | Boarding pass runs remote code (installer, wiring) on a fresh agent | MEDIUM | Mitigated — pass is operator-framed and uses download → review → run, never blind `curl \| sh` |
 | T5 | Plaintext bus history on disk (inbox, rider join.log) | MEDIUM | Mitigated — rider dir `0700`, inbox & log `0600` |
 | T6 | Oversized-line / flood abuse by a rider | MEDIUM | Partly mitigated — 256 KB line cap; no rate limit yet |
-| T7 | Ticket cannot be rotated or a rider revoked without restarting the host | MEDIUM | Open — see "Rotation & revocation" |
+| T7 | Ticket rotation is all-or-nothing (`host --new-ticket`); no per-rider revocation | MEDIUM | Open — see "Rotation & revocation" |
 | T8 | Supply chain: pinned tailcat (no stability promise); installer fetches a release binary | LOW | Pinned versions; installer reviewed before run |
 
 ### T1 — execution is the product
@@ -88,8 +88,15 @@ What this does NOT close: names that no key has ever claimed remain
 unauthenticated (backwards compatibility) — a ticket holder can still
 send under an unbound name; TOFU means the FIRST claim is unverified (a
 ticket holder who claims a name before its owner does owns it until the
-bus restarts); and key custody is a file (`id_ed25519`, 0600) — host
-compromise is key compromise. For riders on unbound names the old rule
+operator rotates with `host --new-ticket`); and key custody is a file
+(`id_ed25519`, 0600) — host compromise is key compromise.
+
+Bindings **persist across host restarts** (#34): the hub rewrites
+`~/.agentbus/host/tofu.json` (0600) on every bind and reloads it on
+start. A restart resumes the same ticket and the same trust table — it
+does not reset trust, so a restart window cannot be used to squat a
+known rider's name. The deliberate reset is `host --new-ticket`: new
+ticket, empty trust table, every rider re-boards. For riders on unbound names the old rule
 stands: judge by task content, and do not put a rider that trusts sender
 identity on a bus with untrusted participants.
 
@@ -121,9 +128,12 @@ norm).
 
 ### Rotation & revocation (T7)
 
-Today the ticket embeds the host's ephemeral public key, so the only way
-to invalidate it is to stop the host and start a new one (new key → new
-ticket). There is no in-place rekey and no way to kick a single rider.
+The ticket embeds the host's node public key, which since #34 persists
+under `~/.agentbus/host/` — a plain restart resumes the same ticket. To
+invalidate a ticket, restart the host with `--new-ticket` (new key → new
+ticket, TOFU bindings wiped with it). There is no in-place rekey and no
+way to kick a single rider. The identity file holds the node PRIVATE
+key (0600, dir 0700): whoever reads it can impersonate the bus.
 
 This is a real limitation, not a recommendation. tailcat exposes
 `Server.AllowedClients` / `AddAllowedClient` (per-client key allowlisting),
@@ -141,8 +151,9 @@ as future work.
   through). It is paste-relayable, not yet voice/short-code-relayable.
 - Do not commit tickets. A gitleaks rule (`agentbus-ticket`) blocks them at
   pre-commit and in CI; see below.
-- To invalidate a ticket, restart the host (until per-rider revocation
-  lands).
+- To invalidate a ticket, restart the host with `--new-ticket` (until
+  per-rider revocation lands). A plain restart now RESUMES the saved
+  ticket (#34) — it no longer rotates anything.
 
 ## Secret scanning
 
