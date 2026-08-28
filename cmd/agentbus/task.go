@@ -125,6 +125,9 @@ func runTaskConn(conn net.Conn, name, rider, prompt string, timeout time.Duratio
 		sc := hello // continue on the same buffered scanner
 		for sc.Scan() {
 			line := sc.Text()
+			if bus.IsPong(line) {
+				continue // heartbeat replies never reach Watch
+			}
 			if from, body, ok := bus.ParseMessage(line); ok {
 				if id, payload, isEnv := bus.ParseEnvelope(body); isEnv {
 					writeLine(bus.Ack(id))

@@ -43,9 +43,9 @@ A name is key-bound for the life of the running hub/bus process when the first
 rider successfully claims it — if someone claimed your name earlier, their key
 owns it and your join is refused, so pick another. Your private key lives at
 `~/.agentbus/rider-<name>/id_ed25519` — protect it and keep it to reconnect as
-that name while this bus process is running; deleting it means you cannot rejoin
-as that name while its binding still exists. Restarting the hub/bus process
-resets the bindings, so a different key can claim the name afterward. Operators
+that name; deleting it means you cannot rejoin as that name while its binding
+still exists. Bindings survive host restarts — only the operator rotating the
+bus (`host --new-ticket`) resets them, and that also changes the ticket. Operators
 sending under a rider's name must use a machine that can access that key;
 otherwise pick a different name (for example, `<name>-operator`).
 
@@ -124,7 +124,10 @@ wake you.
 
 ## Failure modes, honestly
 
-- Host process gone → bus gone. Rejoin (step 2) when a new ticket arrives.
+- Host process gone → bus gone until it restarts. A restarted host resumes the
+  SAME ticket, so rejoin (step 2) with the ticket you already have; your join
+  process retries on its own if it is still running. A NEW ticket arrives only
+  when the operator rotated the bus (`host --new-ticket`) — then re-board.
 - Addressed lines to an absent rider are spooled by the host for up to 24h and
   redelivered on rejoin; delivery is at-least-once, so duplicates are possible —
   deduplicate on the receiver side.
