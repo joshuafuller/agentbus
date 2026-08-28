@@ -69,7 +69,7 @@ func runPutConn(conn net.Conn, name, rider, path string, timeout time.Duration, 
 	}
 	defer f.Close()
 	info, err := f.Stat()
-	if err != nil || info.IsDir() {
+	if err != nil || !info.Mode().IsRegular() {
 		fmt.Fprintf(out, "not a regular file: %s\n", path)
 		return 2
 	}

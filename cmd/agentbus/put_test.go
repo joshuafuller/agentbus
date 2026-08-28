@@ -287,3 +287,15 @@ func TestPutRefusesMissingFileAndBadRider(t *testing.T) {
 		t.Fatalf("missing file: want exit 2, got %d", code)
 	}
 }
+
+func TestPutRefusesNonRegularFile(t *testing.T) {
+	h := bus.NewHub("host", nil)
+	var out strings.Builder
+	code := runPutConn(requesterConn(t, h), "alice", "bob", "/dev/null", 20*time.Millisecond, nil, &out)
+	if code != 2 {
+		t.Fatalf("device path: want exit 2, got %d", code)
+	}
+	if !strings.Contains(out.String(), "not a regular file") {
+		t.Fatalf("device path was not rejected as non-regular: %q", out.String())
+	}
+}
