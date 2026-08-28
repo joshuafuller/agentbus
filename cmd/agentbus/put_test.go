@@ -193,6 +193,75 @@ func TestPutReportsClosedConnectionBeforeWelcome(t *testing.T) {
 	}
 }
 
+func TestPutDoesNotAckUnrelatedEnvelope(t *testing.T) {
+	client, peer := net.Pipe()
+	t.Cleanup(func() {
+		client.Close()
+		peer.Close()
+	})
+	acks := make(chan string, 4)
+	go func() {
+		sc := bufio.NewScanner(peer)
+		if !sc.Scan() {
+			return
+		}
+		peer.Write([]byte(bus.Notice("welcome aboard, alice — 2 on the bus") + "\n"))
+		var transferID string
+		sent := false
+		for sc.Scan() {
+			line := sc.Text()
+			if id, ok := bus.ParseAck(line); ok {
+				acks <- id
+				continue
+			}
+			_, payload, ok := bus.ParseAddressed(line)
+			if !ok {
+				continue
+			}
+			if h, ok := bus.ParseBlobHeader(payload); ok {
+				transferID = h.ID
+				continue
+			}
+			if _, _, _, ok := bus.ParseBlobChunk(payload); ok && !sent {
+				sent = true
+				go func() {
+					peer.Write([]byte(bus.Message("server", bus.Envelope("unrelated-envelope", bus.BlobReceipt("other", true, ""))) + "\n"))
+					peer.Write([]byte(bus.Message("server", bus.Envelope("matching-envelope", bus.BlobReceipt(transferID, true, ""))) + "\n"))
+				}()
+			}
+		}
+	}()
+	src := filepath.Join(t.TempDir(), "payload.bin")
+	if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int, 1)
+	var out strings.Builder
+	go func() { done <- runPutConn(client, "alice", "bob", src, time.Second, nil, &out) }()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("put returned %d: %q", code, out.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("put did not receive its matching receipt")
+	}
+	gotMatching := false
+	for !gotMatching {
+		select {
+		case id := <-acks:
+			if id == "unrelated-envelope" {
+				t.Fatal("put ACKed an unrelated envelope")
+			}
+			if id == "matching-envelope" {
+				gotMatching = true
+			}
+		case <-time.After(time.Second):
+			t.Fatal("matching receipt envelope was not ACKed")
+		}
+	}
+}
+
 func TestOfferUnwrappedBlobFrame(t *testing.T) {
 	dir := t.TempDir()
 	r := bus.NewBlobReceiver(dir, 0, func(string) {})

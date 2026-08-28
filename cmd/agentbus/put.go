@@ -149,13 +149,16 @@ func runPutConn(conn net.Conn, name, rider, path string, timeout time.Duration, 
 			continue
 		}
 		payload := body
-		if envID, p, isEnv := bus.ParseEnvelope(body); isEnv {
-			fmt.Fprintf(conn, "%s\n", bus.Ack(envID))
+		envID, p, isEnv := bus.ParseEnvelope(body)
+		if isEnv {
 			payload = p
 		}
 		rid, delivered, why, isReceipt := bus.ParseBlobReceipt(payload)
 		if !isReceipt || rid != id {
 			continue // some other traffic addressed to us
+		}
+		if isEnv {
+			fmt.Fprintf(conn, "%s\n", bus.Ack(envID))
 		}
 		if !delivered {
 			fmt.Fprintf(out, "%s rejected %s: %s\n", from, base, why)
