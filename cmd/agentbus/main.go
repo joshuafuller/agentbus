@@ -220,12 +220,13 @@ func runHost(name, onMsg string, sink *bus.Sink) error {
 			Send:  func(line string) { hub.Broadcast(line) },
 			Acked: func(id string) { hub.AckLocal(id) }}
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		blobDir := filepath.Join(home, ".agentbus", "blobs")
-		if err := os.MkdirAll(blobDir, 0o700); err == nil {
-			blobs = bus.NewBlobReceiver(blobDir, 0, func(l string) { sink.Deliver(l) })
-			blobs.Notify = sink.Deliver
-		}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("blob spool: %w", err)
+	}
+	blobs, err = blobReceiverAt(home, sink.Deliver)
+	if err != nil {
+		return err
 	}
 	hub = bus.NewHub(name, hostSink(hostRider, sink.Deliver,
 		func(id string) { hub.AckLocal(id) }, bus.NewDedup(1024), blobs))
@@ -302,6 +303,16 @@ func riderDir(name string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".agentbus", "rider-"+name), nil
+}
+
+func blobReceiverAt(home string, deliver func(string) bool) (*bus.BlobReceiver, error) {
+	dir := filepath.Join(home, ".agentbus", "blobs")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("create blob spool %s: %w", dir, err)
+	}
+	blobs := bus.NewBlobReceiver(dir, 0, func(l string) { deliver(l) })
+	blobs.Notify = deliver
+	return blobs, nil
 }
 
 func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
@@ -385,16 +396,17 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 	// Blob transfers (issue #2) reassemble into a content-addressed
 	// spool; the agent gets one FILE notice per file, never the bytes.
 	var blobs *bus.BlobReceiver
-	if home, err := os.UserHomeDir(); err == nil {
-		blobDir := filepath.Join(home, ".agentbus", "blobs")
-		if err := os.MkdirAll(blobDir, 0o700); err == nil {
-			blobs = bus.NewBlobReceiver(blobDir, 0, func(l string) { sink.Deliver(l) })
-			blobs.Notify = sink.Deliver
-			// The delivery receipt goes back to the sender as an
-			// addressed line, so `put` knows the bytes landed.
-			blobs.Reply = func(to, line string) { sendLine(bus.Addressed(to, line)) }
-		}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("blob spool: %w", err)
 	}
+	blobs, err = blobReceiverAt(home, sink.Deliver)
+	if err != nil {
+		return err
+	}
+	// The delivery receipt goes back to the sender as an addressed line,
+	// so `put` knows the bytes landed.
+	blobs.Reply = func(to, line string) { sendLine(bus.Addressed(to, line)) }
 	// At-least-once delivery: the hub redelivers unACKed envelopes, so
 	// remember recent ids and re-ACK duplicates without reprocessing.
 	seen := bus.NewDedup(1024)

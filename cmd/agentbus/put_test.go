@@ -299,3 +299,13 @@ func TestPutRefusesNonRegularFile(t *testing.T) {
 		t.Fatalf("device path was not rejected as non-regular: %q", out.String())
 	}
 }
+
+func TestBlobReceiverAtReportsSpoolInitializationFailure(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.WriteFile(home, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blobReceiverAt(home, func(string) bool { return true }); err == nil {
+		t.Fatal("blob spool initialization failure was swallowed")
+	}
+}
