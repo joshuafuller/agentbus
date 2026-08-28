@@ -56,6 +56,11 @@ type Hub struct {
 	// only connections that prove possession of that key via the fresh
 	// per-connection challenge; the ticket admits, the key identifies.
 	bindings map[string]ed25519.PublicKey
+
+	// bindingsPath, when non-empty (armed via PersistBindings), is
+	// where the TOFU table is rewritten after every new bind so trust
+	// survives a host restart (#34).
+	bindingsPath string
 }
 
 // maxLineBytes bounds a single bus line. Generous for real messages
@@ -224,8 +229,15 @@ func (h *Hub) handshake(conn net.Conn, sc *bufio.Scanner, name string, oneshot b
 		// Trust on first use: the first RIDER to claim the name
 		// binds it. Oneshot senders prove keys but never bind.
 		h.bindings[name] = pub
+		saveErr := h.saveBindingsLocked()
 		h.mu.Unlock()
 		h.notice(fmt.Sprintf("%s is now key-bound (trust on first use)", name), nil)
+		if saveErr != nil {
+			// The bind stands for this run but will not survive a
+			// restart — say so on the feed instead of silently
+			// re-opening the TOFU window later.
+			h.notice(fmt.Sprintf("could not persist the TOFU binding for %s: %v", name, saveErr), nil)
+		}
 	default:
 		h.mu.Unlock()
 	}
@@ -322,8 +334,15 @@ func (h *Hub) handleLine(conn net.Conn, me *peer, name, line string) {
 	} else {
 		h.mu.Unlock()
 	}
-	// Heartbeats only refresh last-seen; consumed, never relayed.
+	// Heartbeats refresh last-seen and are answered with a PONG on the
+	// same conn — the rider's probe that the host is still alive (#34);
+	// consumed, never relayed.
 	if IsPing(line) {
+		h.mu.Lock()
+		if p, ok := h.peers[conn]; ok {
+			enqueue(conn, p, Pong())
+		}
+		h.mu.Unlock()
 		return
 	}
 	// ACKs are control traffic between this peer and its pump —

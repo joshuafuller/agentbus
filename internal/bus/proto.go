@@ -140,6 +140,15 @@ func Ping() string { return "PING" }
 // IsPing reports whether a line is a heartbeat.
 func IsPing(line string) bool { return strings.TrimSpace(line) == "PING" }
 
+// Pong is the hub's reply to a PING (hub → client, consumed by the
+// join loop, never delivered to agents): it makes the heartbeat a
+// liveness probe of the HOST, so a rider whose host died without a
+// FIN sees its read deadline expire and reconnects (#34).
+func Pong() string { return "PONG" }
+
+// IsPong reports whether a line is a heartbeat reply.
+func IsPong(line string) bool { return strings.TrimSpace(line) == "PONG" }
+
 // SendOK is the hub's receipt to a ONE-SHOT sender that its addressed
 // line was durably accepted (spooled, or delivered on a no-spool hub).
 // Broadcast notices deliberately skip one-shot peers, so without this
