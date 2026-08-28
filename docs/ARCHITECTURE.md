@@ -181,11 +181,14 @@ held until real usage demands it:
 
 | Deferred | Why held | Where it would go |
 |----------|----------|-------------------|
-| Offline delivery / durability | Prove the live loop first | host-side spool, catch-up on rejoin |
 | Per-rider revocation | Admission machinery | tailcat `AllowedClients` |
 | Short-code (voice-relayable) admission | Needs a rendezvous/PAKE layer | in front of ticket resolution |
 | Sender authentication | Identity is its own subsystem | signed names / MLS |
 | Multiparty group crypto | Two-party transport works first | above the transport |
+
+**Offline delivery / durability has since shipped** (2026-08-27): the host runs
+a 24h `FileSpool` that durably queues addressed lines and redelivers them
+at-least-once on rejoin, so it is no longer a non-goal.
 
 > Two of these — sender authentication and per-rider revocation — are now
 > under active reconsideration, not because the rule

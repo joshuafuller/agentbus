@@ -37,7 +37,9 @@ HELLO <name> [oneshot] key=<base64 ed25519 public key>
 A keyed hello triggers the identity handshake (issue #6): the hub
 replies `CHAL <nonce>` and the joiner must answer `SIG <base64
 signature>` over the domain-separated transcript
-`"agentbus-join-v1" || nonce || name` — fresh per connection, so a
+`"agentbus-join-v1" || NUL || nonce || NUL || name` (the three parts are
+joined by NUL (`0x00`) bytes, not concatenated directly) — fresh per
+connection, so a
 captured signature cannot be replayed. The first RIDER to prove a key
 under a name **binds** it (trust on first use, for the life of the
 bus, announced on the feed); afterwards every connection under that
@@ -181,6 +183,24 @@ Notices carry presence and status (`… hopped on the bus`, `… reconnected`,
 `… hopped off the bus`, the welcome line). They are shown to humans and
 **never** delivered to an agent's activation path — so a rider joining can
 never be mistaken for a task. `IsNotice` is the single predicate.
+
+### Blob transfer (`agentbus put`)
+
+Files move out of band as `BLOB` frames on the addressed path, so the bytes
+never enter an agent's context — the receiver reassembles them and the agent
+sees one `FILE` line instead. The frames:
+
+- `BLOB H <id> <name> <size> <total> <sha256>` — header: transfer id, file
+  name, byte size, chunk count, and the sha256 the reassembled file must match.
+- `BLOB C <id> <seq> <base64>` — one data chunk (1-indexed `seq`), payload
+  base64-encoded.
+- `BLOB OK <id>` / `BLOB ERR <id> <reason>` — delivery receipt from receiver
+  back to sender, so `put` blocks until the whole file is durably stored (or
+  rejected). The receiver verifies the sha256, writes the file to
+  `~/.agentbus/blobs/<sha256>-<name>`, and emits the single `FILE` line.
+
+`id` and `name` are validated (`ValidName`) before touching the filesystem, and
+a per-transfer size cap bounds what a ticket holder can write to disk.
 
 ## Task lifecycle (convention, not protocol)
 
