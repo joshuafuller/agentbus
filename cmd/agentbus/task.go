@@ -303,6 +303,10 @@ func hostSink(rider *task.Rider, sink func(line string) bool, ackLocal func(id s
 // only the plumbing of its output differs.
 func execRunner(onMsg string) func(prompt string) (string, error) {
 	return func(prompt string) (string, error) {
+		// Intentional shell invocation: onMsg is the operator-configured
+		// wake command (--on-msg) and is deliberately a shell command; the
+		// wire-derived prompt reaches it only via AGENTBUS_MSG/AGENTBUS_TEXT
+		// env vars, never interpolated into the shell (the T3 rule).
 		cmd := exec.Command("sh", "-c", onMsg)
 		cmd.Env = append(os.Environ(),
 			"AGENTBUS_MSG="+prompt,

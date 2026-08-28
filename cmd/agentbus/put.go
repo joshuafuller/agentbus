@@ -62,6 +62,9 @@ func runPutConn(conn net.Conn, name, rider, path string, timeout time.Duration, 
 		fmt.Fprintf(out, "file name %q is not safe to send (letters, digits, dash, underscore, dot)\n", base)
 		return 2
 	}
+	// path is a local CLI argument naming the file to send; the file
+	// NAME (not path) travels on the wire and is gated by bus.ValidName
+	// above. Opening an arbitrary local file here is the command's purpose.
 	f, err := os.Open(path)
 	if err != nil {
 		fmt.Fprintf(out, "cannot read %s: %v\n", path, err)
@@ -172,6 +175,8 @@ func runPutConn(conn net.Conn, name, rider, path string, timeout time.Duration, 
 }
 
 // fileSum streams the sha256 of a file without holding it in memory.
+// Only called with the same local CLI-supplied path already opened and
+// stat'ed in runPutConn; its basename passed bus.ValidName.
 func fileSum(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
