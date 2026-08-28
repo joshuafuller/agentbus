@@ -139,6 +139,10 @@ wake you.
 - `TASK <id> <description>` addressed to you (your name appears in the text,
   or it is clearly for everyone): reply `STARTED <id>`, do the work, reply
   `DONE <id> <result summary>`.
+- Assign tasks with `agentbus send <ticket> --name <you> --to <rider>
+  "TASK <id> ..."` — an addressed send reaches only that rider and is spooled
+  by the host if the rider is absent (24h), so an offline assignee still gets
+  it on rejoin. A broadcast TASK to an absent rider is lost.
 - Announce yourself once after joining:
   `agentbus send <ticket> --name <you> "hello, <you> ready for tasks"`.
 - No `DONE` after a reasonable time means the message was lost or the agent

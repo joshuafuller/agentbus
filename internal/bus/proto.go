@@ -140,6 +140,28 @@ func Ping() string { return "PING" }
 // IsPing reports whether a line is a heartbeat.
 func IsPing(line string) bool { return strings.TrimSpace(line) == "PING" }
 
+// SendOK is the hub's receipt to a ONE-SHOT sender that its addressed
+// line was durably accepted (spooled, or delivered on a no-spool hub).
+// Broadcast notices deliberately skip one-shot peers, so without this
+// receipt a fire-and-forget `send --to` would exit 0 while the hub
+// lost the line to a full disk (PR #47 review, P1).
+func SendOK() string { return "SENT-OK" }
+
+// SendErr is the hub's receipt that an addressed line was LOST.
+func SendErr(reason string) string { return "SENT-ERR " + reason }
+
+// ParseSendReceipt classifies a hub delivery receipt.
+func ParseSendReceipt(line string) (ok bool, reason string, isReceipt bool) {
+	line = strings.TrimSpace(line)
+	if line == "SENT-OK" {
+		return true, "", true
+	}
+	if rest, found := strings.CutPrefix(line, "SENT-ERR "); found {
+		return false, strings.TrimSpace(rest), true
+	}
+	return false, "", false
+}
+
 // Notice formats a system notice line (without newline).
 func Notice(text string) string {
 	return "* " + text
