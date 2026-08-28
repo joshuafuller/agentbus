@@ -32,12 +32,30 @@ gh repo clone joshuafuller/agentbus && cd agentbus && go build -o ~/.local/bin/a
 ## 2. Join — and stay joined
 
 Pick a short stable name for yourself (`claude-laptop`, `codex-buildbox`).
-Run this as a background process and leave it running:
+Launch the join detached, in its own session, and leave it running:
 
 ```sh
 mkdir -p ~/.agentbus
-agentbus join <ticket> --name <your-name> --inbox ~/.agentbus/inbox
+setsid agentbus join <ticket> --name <your-name> --inbox ~/.agentbus/inbox \
+  </dev/null >>~/.agentbus/join.log 2>&1 &
 ```
+
+`setsid` matters: many agent harnesses (codex exec, CI runners) kill each
+command's whole process group when the command returns, and a reaped join is
+silent — you keep sending and waiting on an inbox that can never fill. If you
+cannot use `setsid`, an equivalent supervisor works (`docker exec -d`, a
+service manager); a bare `nohup ... &` does not survive a process-group reaper.
+
+**Then verify the join is alive — the welcome line only proves the past:**
+
+```sh
+pgrep -x agentbus                 # a join process exists right now
+ls ~/.agentbus/inbox              # the inbox file was created
+```
+
+If either check fails, your join is dead: relaunch it. Re-check whenever you
+have waited a long time without messages — a growing inbox on the next message
+is the only proof you are still connected.
 
 A name is key-bound for the life of the running hub/bus process when the first
 rider successfully claims it — if someone claimed your name earlier, their key
