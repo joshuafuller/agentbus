@@ -84,6 +84,10 @@ func selfTestWithTimeout(onMsg string, timeout time.Duration) error {
 	// output framing varies by runtime, so the prompt matches the
 	// check: any brief reply proves the wake path is alive.
 	probe := "wire self-test: reply briefly to confirm you are awake"
+	// Intentional shell invocation: onMsg is the wake command this same
+	// function built (claudeOnMsg/codexOnMsg) from a ValidName-checked
+	// name/model and local paths — never raw wire bytes. The probe
+	// prompt reaches the command via AGENTBUS_MSG env, not the shell.
 	cmd := exec.CommandContext(ctx, "sh", "-c", onMsg)
 	// Kill the whole process GROUP on deadline: the context alone only
 	// kills sh, and a surviving grandchild holding the stdout pipe
@@ -134,6 +138,8 @@ func runWire(runtime, ticket, name, model string) error {
 	dir := filepath.Join(home, ".agentbus", "rider-"+name)
 	// 0700: the rider dir holds the conversation and a plaintext log of
 	// all bus traffic; keep it to the owner.
+	// dir's only variable component is the rider name, which passed
+	// bus.ValidName above — no separators or traversal possible.
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -142,6 +148,10 @@ func runWire(runtime, ticket, name, model string) error {
 	switch runtime {
 	case "claude":
 		fmt.Fprintf(os.Stderr, "wiring %s: creating rider conversation in %s...\n", name, dir)
+		// Intentional fixed-binary exec: "claude" is literal, the
+		// briefing prompt is text (argv, never a shell line), and
+		// name/model passed bus.ValidName above. Ticket is a local
+		// CLI arg embedded in prompt text only.
 		boot := exec.Command("claude", "-p", briefing(ticket, name), "--allowedTools", "Bash")
 		if model != "" {
 			boot.Args = append(boot.Args, "--model", model)
@@ -154,6 +164,10 @@ func runWire(runtime, ticket, name, model string) error {
 		onMsg = claudeOnMsg(dir, model)
 	case "codex":
 		fmt.Fprintf(os.Stderr, "wiring %s: creating rider session in %s...\n", name, dir)
+		// Intentional fixed-binary exec: "codex" is literal, args come
+		// from codexBootArgs (briefing text + ValidName-checked model),
+		// and the session id is matched from codex's own output against
+		// a strict [0-9a-f-]{36} pattern before reuse.
 		boot := exec.Command("codex", codexBootArgs(briefing(ticket, name), model)...)
 		boot.Dir = dir
 		out, err := boot.CombinedOutput()
@@ -176,7 +190,7 @@ func runWire(runtime, ticket, name, model string) error {
 		return fmt.Errorf("%s is NOT wired — %w\nwake command was: %s", name, err, onMsg)
 	}
 
-	logPath := filepath.Join(dir, "join.log")
+	logPath := filepath.Join(dir, "join.log") // dir gated by bus.ValidName
 	logf, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -184,6 +198,10 @@ func runWire(runtime, ticket, name, model string) error {
 	defer logf.Close()
 
 	join := exec.Command(self, "join", ticket, "--name", name, "--on-msg", onMsg)
+	// Intentional subprocess: self is os.Executable() (our own binary),
+	// name/model passed bus.ValidName, ticket is the local CLI arg
+	// (tailcat "tc..." conn blob), and onMsg is the shell command this
+	// function itself constructed from those validated parts.
 	join.Stdout, join.Stderr = logf, logf
 	join.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // survive this session
 	if err := join.Start(); err != nil {
@@ -192,6 +210,8 @@ func runWire(runtime, ticket, name, model string) error {
 
 	deadline := time.Now().Add(45 * time.Second)
 	for {
+		// logPath sits under dir, whose only variable part is the
+		// ValidName-checked rider name — no traversal possible.
 		b, _ := os.ReadFile(logPath)
 		if strings.Contains(string(b), "welcome aboard, "+name) {
 			break
