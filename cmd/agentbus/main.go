@@ -206,6 +206,7 @@ func runHost(name, onMsg string, sink *bus.Sink) error {
 	// payloads readable.
 	var hub *bus.Hub
 	var hostRider *task.Rider
+	var blobs *bus.BlobReceiver
 	if onMsg != "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -219,8 +220,19 @@ func runHost(name, onMsg string, sink *bus.Sink) error {
 			Send:  func(line string) { hub.Broadcast(line) },
 			Acked: func(id string) { hub.AckLocal(id) }}
 	}
+	if home, err := os.UserHomeDir(); err == nil {
+		blobDir := filepath.Join(home, ".agentbus", "blobs")
+		if err := os.MkdirAll(blobDir, 0o700); err == nil {
+			blobs = bus.NewBlobReceiver(blobDir, 0, func(l string) { sink.Deliver(l) })
+		}
+	}
 	hub = bus.NewHub(name, hostSink(hostRider, sink.Deliver,
-		func(id string) { hub.AckLocal(id) }, bus.NewDedup(1024)))
+		func(id string) { hub.AckLocal(id) }, bus.NewDedup(1024), blobs))
+	if blobs != nil {
+		// Host-local blob receipts must be addressed back to the put
+		// requester, just like receipts from a remote join.
+		blobs.Reply = func(to, line string) { hub.Broadcast(bus.Addressed(to, line)) }
+	}
 	hub.OnNotice = func(line string) { fmt.Println(line) }
 	// Task lifecycle transitions become feed notices every driver sees
 	// (issue #12). Injected here because bus cannot import task.
