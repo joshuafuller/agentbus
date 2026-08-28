@@ -23,9 +23,14 @@ import (
 // grant more (issue #2 policy note).
 const defaultBlobCap = 64 << 20
 
-// blobChunkSize is the raw bytes per chunk frame: base64 of 128KB is
-// ~171KB, comfortably under the hub's 256KB line cap.
-const blobChunkSize = 128 << 10
+// blobChunkSize is the raw bytes per chunk frame: base64 of 32KB is
+// ~43KB, comfortably under the hub's 256KB line cap. It was 128KB
+// (~171KB lines), but the WAN test showed huge single lines monopolize
+// a slow DERP relay for tens of seconds per write — smaller frames
+// drain within modest write allowances and let chat interleave. The
+// receiver is chunk-size agnostic (header size + seq), so mixed
+// versions interoperate.
+const blobChunkSize = 32 << 10
 
 // BlobHeader announces a transfer: everything the receiver needs to
 // preallocate judgement — name, size, chunk count, and the checksum
@@ -36,6 +41,12 @@ type BlobHeader struct {
 	Size  int64
 	Total int
 	Sum   string // sha256 hex of the whole blob
+	// Chunk is the sender's raw bytes per chunk (the last chunk may be
+	// shorter). Zero on frames from senders predating the field. It is
+	// NOT derivable from Size and Total (many chunk sizes yield the
+	// same total), and a restarted receiver needs it to resume a
+	// partial file at an exact chunk boundary.
+	Chunk int64
 }
 
 func validBlobID(id string) bool {
@@ -52,8 +63,14 @@ func validBlobID(id string) bool {
 	return true
 }
 
-// Encode formats the header frame.
+// Encode formats the header frame. The chunk size rides as a trailing
+// field when known; receivers predating it ignore... no — they refuse
+// the 8-field form, so mixed versions need same-era binaries for blob
+// transfer (pre-1.0, both ends install from the same script).
 func (h BlobHeader) Encode() string {
+	if h.Chunk > 0 {
+		return fmt.Sprintf("BLOB H %s %s %d %d %s %d", h.ID, h.Name, h.Size, h.Total, h.Sum, h.Chunk)
+	}
 	return fmt.Sprintf("BLOB H %s %s %d %d %s", h.ID, h.Name, h.Size, h.Total, h.Sum)
 }
 
@@ -63,7 +80,7 @@ func (h BlobHeader) Encode() string {
 // the wire, not at write time.
 func ParseBlobHeader(line string) (BlobHeader, bool) {
 	f := strings.Fields(line)
-	if len(f) != 7 || f[0] != "BLOB" || f[1] != "H" {
+	if (len(f) != 7 && len(f) != 8) || f[0] != "BLOB" || f[1] != "H" {
 		return BlobHeader{}, false
 	}
 	size, err1 := strconv.ParseInt(f[4], 10, 64)
@@ -83,7 +100,15 @@ func ParseBlobHeader(line string) (BlobHeader, bool) {
 	if _, err := hex.DecodeString(f[6]); err != nil {
 		return BlobHeader{}, false
 	}
-	return BlobHeader{ID: f[2], Name: f[3], Size: size, Total: total, Sum: f[6]}, true
+	var chunk int64
+	if len(f) == 8 {
+		c, err := strconv.ParseInt(f[7], 10, 64)
+		if err != nil || c < 1 {
+			return BlobHeader{}, false
+		}
+		chunk = c
+	}
+	return BlobHeader{ID: f[2], Name: f[3], Size: size, Total: total, Sum: f[6], Chunk: chunk}, true
 }
 
 // BlobChunk formats one data frame.
@@ -127,7 +152,7 @@ func BlobFrames(id, name string, payload []byte, chunk int) []string {
 		total = 1
 	}
 	frames := []string{BlobHeader{ID: id, Name: name, Size: int64(len(payload)),
-		Total: total, Sum: hex.EncodeToString(sum[:])}.Encode()}
+		Total: total, Sum: hex.EncodeToString(sum[:]), Chunk: int64(chunk)}.Encode()}
 	for i := 0; i < total; i++ {
 		end := min((i+1)*chunk, len(payload))
 		frames = append(frames, BlobChunk(id, i+1, payload[i*chunk:end]))
@@ -186,7 +211,13 @@ type blobXfer struct {
 	got     int64
 	next    int
 	refused bool
+	// pendingNotify: every byte is durably published, but the agent has
+	// not accepted the FILE notification yet. A redelivered final chunk
+	// retries the notification instead of counting as a duplicate.
+	pendingNotify bool
+	final         string // publish path, set once renamed out of .partial
 }
+
 
 // NewBlobReceiver returns a receiver spooling into dir. maxBytes <= 0
 // means the default cap.
@@ -251,6 +282,15 @@ func (r *BlobReceiver) Offer(from, payload string) (consumed, ok bool) {
 	return true, r.chunk(id, seq, data)
 }
 
+// headerSidecarExt names the file that persists a header's fields
+// alongside its partial data (#50 review, P1): once a header's
+// envelope is ACKed, the hub's spool forgets it — a receiver that
+// restarts before the transfer finishes would otherwise have no way
+// to identify chunks still arriving for that ID (r.open starts empty,
+// and a chunk frame carries no header fields to rebuild x from). The
+// sidecar is the header's own wire encoding, so no second format.
+const headerSidecarExt = ".hdr"
+
 func (r *BlobReceiver) start(from string, h BlobHeader) bool {
 	if existing, ok := r.open[h.ID]; ok && !existing.refused && existing.hdr == h {
 		return true // retransmitted header; preserve progress and the open file
@@ -272,7 +312,31 @@ func (r *BlobReceiver) start(from string, h BlobHeader) bool {
 		r.receipt(x, false, "spool-error")
 		return false
 	}
-	f, err := os.OpenFile(filepath.Join(part, h.ID), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	// Sidecar written (and synced) BEFORE the data file — a crash
+	// between the two leaves at worst an orphaned sidecar with no
+	// partial (harmless; the next header for this ID rewrites it),
+	// never a partial with no way to identify it on restart.
+	sidecar := filepath.Join(part, h.ID+headerSidecarExt)
+	if err := os.WriteFile(sidecar, []byte(h.Encode()+"\n"+from), 0o600); err != nil {
+		x.refused = true
+		r.rejected[h.ID] = struct{}{}
+		r.note(fmt.Sprintf("could not spool %s from %s: %v", h.Name, from, err))
+		r.receipt(x, false, "spool-error")
+		return false
+	}
+	path := filepath.Join(part, h.ID)
+	// Resume (per-frame ACK, #47/#49 follow-up): frames are ACKed as
+	// they are durably written, so the hub will NOT redeliver them
+	// after a receiver restart — the partial file on disk is the only
+	// copy of that progress. Reopen it, trim any torn tail to a whole
+	// chunk, replay it through the hash, and continue from there.
+	if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
+		if resumed := r.resume(x, path, fi.Size()); resumed {
+			return true
+		}
+		// Unresumable partial: start over below.
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		x.refused = true
 		r.rejected[h.ID] = struct{}{}
@@ -284,16 +348,80 @@ func (r *BlobReceiver) start(from string, h BlobHeader) bool {
 	return true
 }
 
+// resume reopens an existing partial file for x: whole chunks are kept
+// (a torn tail is truncated away), replayed into the running hash, and
+// the next expected sequence follows from the byte offset. Reports
+// whether the resume succeeded; on false the caller starts fresh.
+// Requires the header's chunk-size field — a legacy header without it
+// cannot place the chunk boundary, so its partials start over.
+func (r *BlobReceiver) resume(x *blobXfer, path string, size int64) bool {
+	chunk := x.hdr.Chunk
+	if chunk <= 0 {
+		return false
+	}
+	keep := size - size%chunk
+	if keep > x.hdr.Size {
+		return false // larger than the announced blob: not ours to trust
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		return false
+	}
+	if err := f.Truncate(keep); err != nil {
+		f.Close()
+		return false
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		f.Close()
+		return false
+	}
+	buf := make([]byte, 64<<10)
+	var replayed int64
+	for replayed < keep {
+		n, err := f.Read(buf)
+		if n > 0 {
+			x.sum.Write(buf[:n])
+			replayed += int64(n)
+		}
+		if err != nil {
+			f.Close()
+			return false
+		}
+	}
+	if _, err := f.Seek(keep, 0); err != nil {
+		f.Close()
+		return false
+	}
+	x.file = f
+	x.got = keep
+	x.next = int(keep/chunk) + 1
+	return true
+}
+
 func (r *BlobReceiver) chunk(id string, seq int, data []byte) bool {
 	x := r.open[id]
 	if x == nil {
-		return false // chunk for a transfer we never saw the header of
+		// The header's own envelope may already be ACKed and forgotten
+		// by the hub's spool — normal after a receiver restart mid-
+		// transfer, since header ACK happens before the transfer
+		// completes. Its sidecar on disk is the only remaining record;
+		// reconstruct x from it rather than reject chunks for a
+		// transfer that is legitimately still in progress (#50 review).
+		x = r.reopenFromSidecar(id)
+		if x == nil {
+			return false // no sidecar either: a transfer we never saw
+		}
 	}
 	if x.refused {
 		r.rejected[id] = struct{}{}
 		return false // already reported; swallow the rest quietly
 	}
 	if seq < x.next {
+		if x.pendingNotify {
+			// All bytes are published; only the notification is owed.
+			// A redelivered final chunk is the retry vehicle.
+			return r.notifyPublished(x)
+		}
 		r.duplicates[id] = struct{}{}
 		return true
 	}
@@ -306,10 +434,51 @@ func (r *BlobReceiver) chunk(id string, seq int, data []byte) bool {
 	if _, err := x.file.Write(data); err != nil {
 		return r.abort(x, err.Error())
 	}
+	// Per-frame durability: the frame's envelope is ACKed as soon as
+	// this returns true, and an ACKed frame is never redelivered — the
+	// bytes must not be sitting in a page cache a crash can drop.
+	if err := x.file.Sync(); err != nil {
+		return r.abort(x, err.Error())
+	}
 	if x.next <= x.hdr.Total {
 		return true
 	}
 	return r.finish(x)
+}
+
+// reopenFromSidecar reconstructs an in-progress transfer's header from
+// its sidecar file (written durably at start, before any chunk data)
+// and resumes the partial from disk. Returns nil when there is no
+// sidecar, it is unreadable/mismatched, or the partial cannot resume —
+// any of which means this really is an unknown transfer.
+func (r *BlobReceiver) reopenFromSidecar(id string) *blobXfer {
+	if !validBlobID(id) {
+		return nil
+	}
+	part := filepath.Join(r.dir, ".partial")
+	data, err := os.ReadFile(filepath.Join(part, id+headerSidecarExt))
+	if err != nil {
+		return nil
+	}
+	line, from, ok := strings.Cut(string(data), "\n")
+	if !ok || from == "" {
+		return nil
+	}
+	h, ok := ParseBlobHeader(strings.TrimSuffix(line, "\n"))
+	if !ok || h.ID != id {
+		return nil
+	}
+	x := &blobXfer{hdr: h, from: from, sum: sha256.New(), next: 1}
+	path := filepath.Join(part, id)
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() == 0 {
+		return nil // no data yet: the FIRST chunk should recreate normally
+	}
+	if !r.resume(x, path, fi.Size()) {
+		return nil
+	}
+	r.open[id] = x
+	return x
 }
 
 // abort discards a transfer's partial file and tells the driver once.
@@ -321,6 +490,7 @@ func (r *BlobReceiver) abort(x *blobXfer, why string) bool {
 		x.file.Close()
 	}
 	os.Remove(filepath.Join(r.dir, ".partial", x.hdr.ID))
+	os.Remove(filepath.Join(r.dir, ".partial", x.hdr.ID+headerSidecarExt))
 	r.note(fmt.Sprintf("discarded a corrupt transfer of %s from %s (%s)", x.hdr.Name, x.from, why))
 	r.receipt(x, false, why)
 	return false
@@ -346,22 +516,30 @@ func (r *BlobReceiver) finish(x *blobXfer) bool {
 		r.rejected[x.hdr.ID] = struct{}{}
 		delete(r.open, x.hdr.ID)
 		os.Remove(filepath.Join(r.dir, ".partial", x.hdr.ID))
+		os.Remove(filepath.Join(r.dir, ".partial", x.hdr.ID+headerSidecarExt))
 		r.note(fmt.Sprintf("could not publish %s from %s: %v", x.hdr.Name, x.from, err))
 		r.receipt(x, false, "publish-error")
 		return false
 	}
-	line := fmt.Sprintf("[%s] FILE %s %s %dB → %s", x.from, got, x.hdr.Name, x.got, final)
-	delete(r.open, x.hdr.ID)
-	if r.Notify != nil {
-		if !r.Notify(line) {
-			// The bytes are durable, but the agent has not accepted the
-			// only notification that makes them discoverable. Leave the
-			// transfer unacknowledged so the envelope owner can retry.
-			return false
-		}
-	} else {
+	os.Remove(filepath.Join(r.dir, ".partial", x.hdr.ID+headerSidecarExt))
+	x.final = final
+	return r.notifyPublished(x)
+}
+
+// notifyPublished delivers the one FILE line for an already-published
+// blob. A refused notification keeps the transfer open with the debt
+// recorded (pendingNotify): the unACKed final frame's redelivery
+// retries it, so the bytes on disk cannot silently stay undiscoverable.
+func (r *BlobReceiver) notifyPublished(x *blobXfer) bool {
+	line := fmt.Sprintf("[%s] FILE %s %s %dB → %s", x.from, x.hdr.Sum, x.hdr.Name, x.got, x.final)
+	if r.Notify != nil && !r.Notify(line) {
+		x.pendingNotify = true
+		return false
+	}
+	if r.Notify == nil {
 		r.note(line)
 	}
+	delete(r.open, x.hdr.ID)
 	r.completed[x.hdr.ID] = struct{}{}
 	r.receipt(x, true, "")
 	return true

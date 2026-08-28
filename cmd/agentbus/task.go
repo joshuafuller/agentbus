@@ -202,7 +202,6 @@ func driverLine(line string) string {
 // ACKs after the sink accepts; a refusal leaves the entry spooled for
 // DrainLocal. The returned bool reports sink-level acceptance.
 func hostSink(rider *task.Rider, sink func(line string) bool, ackLocal func(id string), seen *bus.Dedup, blobs *bus.BlobReceiver) func(line string) bool {
-	blobEnvelopes := map[string]map[string]struct{}{}
 	return func(line string) bool {
 		from, body, ok := bus.ParseMessage(line)
 		if !ok {
@@ -227,41 +226,25 @@ func hostSink(rider *task.Rider, sink func(line string) bool, ackLocal func(id s
 					return true
 				}
 			} else if consumed, accepted := blobs.Offer(from, payload); consumed {
+				// Per-frame ACK once durably written (see the join
+				// loop): holding ACKs until blob completion deadlocked
+				// against the pump's unACKed-byte pacing.
 				blobID := blobFrameID(payload)
-				pending := blobEnvelopes[blobID]
-				if pending == nil {
-					pending = map[string]struct{}{}
-					blobEnvelopes[blobID] = pending
-				}
-				pending[envID] = struct{}{}
+				ack := false
 				switch {
-				case accepted && blobs.TakeCompleted(blobID):
-					for id := range pending {
-						if seen != nil {
-							seen.Seen(id)
-						}
-						if ackLocal != nil {
-							ackLocal(id)
-						}
-					}
-					delete(blobEnvelopes, blobID)
-				case blobs.TakeDuplicate(blobID):
+				case accepted:
+					blobs.TakeCompleted(blobID) // bookkeeping only
+					ack = true
+				case blobs.TakeDuplicate(blobID), blobs.TakeRejected(blobID):
+					ack = true
+				}
+				if ack {
 					if seen != nil {
 						seen.Seen(envID)
 					}
 					if ackLocal != nil {
 						ackLocal(envID)
 					}
-				case blobs.TakeRejected(blobID):
-					for id := range pending {
-						if seen != nil {
-							seen.Seen(id)
-						}
-						if ackLocal != nil {
-							ackLocal(id)
-						}
-					}
-					delete(blobEnvelopes, blobID)
 				}
 				return true
 			}
