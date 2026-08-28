@@ -1,0 +1,36 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  settings:
+    errcheck:
+      check-blank: false
+      exclude-functions:
+        - os.(*File).Close
+        - (*os.File).Close
+        - (net.Conn).Close
+        - os.Remove
+        - os.RemoveAll
+        - os.Chmod
+        - fmt.Fprintln
+        - fmt.Fprintf
+        - fmt.Fprint
+        - (io.Writer).Write
+        - (*flag.FlagSet).Parse
+        - (*io.PipeReader).Close
+        - (*io.PipeWriter).Close
+        - (*github.com/tailscale/tailcat.Server).Close
+        - io.Copy
+        - (net.Conn).SetDeadline
+        - (net.Conn).SetReadDeadline
+        - (net.Conn).SetWriteDeadline
+        - os.(*File).Sync
+        - (*os.File).Sync
+        - (github.com/joshuafuller/agentbus/internal/bus.Spooler).Remove
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
