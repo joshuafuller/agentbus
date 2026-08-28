@@ -282,6 +282,15 @@ func (r *BlobReceiver) Offer(from, payload string) (consumed, ok bool) {
 	return true, r.chunk(id, seq, data)
 }
 
+// headerSidecarExt names the file that persists a header's fields
+// alongside its partial data (#50 review, P1): once a header's
+// envelope is ACKed, the hub's spool forgets it — a receiver that
+// restarts before the transfer finishes would otherwise have no way
+// to identify chunks still arriving for that ID (r.open starts empty,
+// and a chunk frame carries no header fields to rebuild x from). The
+// sidecar is the header's own wire encoding, so no second format.
+const headerSidecarExt = ".hdr"
+
 func (r *BlobReceiver) start(from string, h BlobHeader) bool {
 	if existing, ok := r.open[h.ID]; ok && !existing.refused && existing.hdr == h {
 		return true // retransmitted header; preserve progress and the open file
@@ -297,6 +306,18 @@ func (r *BlobReceiver) start(from string, h BlobHeader) bool {
 	}
 	part := filepath.Join(r.dir, ".partial")
 	if err := os.MkdirAll(part, 0o700); err != nil {
+		x.refused = true
+		r.rejected[h.ID] = struct{}{}
+		r.note(fmt.Sprintf("could not spool %s from %s: %v", h.Name, from, err))
+		r.receipt(x, false, "spool-error")
+		return false
+	}
+	// Sidecar written (and synced) BEFORE the data file — a crash
+	// between the two leaves at worst an orphaned sidecar with no
+	// partial (harmless; the next header for this ID rewrites it),
+	// never a partial with no way to identify it on restart.
+	sidecar := filepath.Join(part, h.ID+headerSidecarExt)
+	if err := os.WriteFile(sidecar, []byte(h.Encode()+"\n"+from), 0o600); err != nil {
 		x.refused = true
 		r.rejected[h.ID] = struct{}{}
 		r.note(fmt.Sprintf("could not spool %s from %s: %v", h.Name, from, err))
@@ -380,7 +401,16 @@ func (r *BlobReceiver) resume(x *blobXfer, path string, size int64) bool {
 func (r *BlobReceiver) chunk(id string, seq int, data []byte) bool {
 	x := r.open[id]
 	if x == nil {
-		return false // chunk for a transfer we never saw the header of
+		// The header's own envelope may already be ACKed and forgotten
+		// by the hub's spool — normal after a receiver restart mid-
+		// transfer, since header ACK happens before the transfer
+		// completes. Its sidecar on disk is the only remaining record;
+		// reconstruct x from it rather than reject chunks for a
+		// transfer that is legitimately still in progress (#50 review).
+		x = r.reopenFromSidecar(id)
+		if x == nil {
+			return false // no sidecar either: a transfer we never saw
+		}
 	}
 	if x.refused {
 		r.rejected[id] = struct{}{}
@@ -416,6 +446,41 @@ func (r *BlobReceiver) chunk(id string, seq int, data []byte) bool {
 	return r.finish(x)
 }
 
+// reopenFromSidecar reconstructs an in-progress transfer's header from
+// its sidecar file (written durably at start, before any chunk data)
+// and resumes the partial from disk. Returns nil when there is no
+// sidecar, it is unreadable/mismatched, or the partial cannot resume —
+// any of which means this really is an unknown transfer.
+func (r *BlobReceiver) reopenFromSidecar(id string) *blobXfer {
+	if !validBlobID(id) {
+		return nil
+	}
+	part := filepath.Join(r.dir, ".partial")
+	data, err := os.ReadFile(filepath.Join(part, id+headerSidecarExt))
+	if err != nil {
+		return nil
+	}
+	line, from, ok := strings.Cut(string(data), "\n")
+	if !ok || from == "" {
+		return nil
+	}
+	h, ok := ParseBlobHeader(strings.TrimSuffix(line, "\n"))
+	if !ok || h.ID != id {
+		return nil
+	}
+	x := &blobXfer{hdr: h, from: from, sum: sha256.New(), next: 1}
+	path := filepath.Join(part, id)
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() == 0 {
+		return nil // no data yet: the FIRST chunk should recreate normally
+	}
+	if !r.resume(x, path, fi.Size()) {
+		return nil
+	}
+	r.open[id] = x
+	return x
+}
+
 // abort discards a transfer's partial file and tells the driver once.
 func (r *BlobReceiver) abort(x *blobXfer, why string) bool {
 	x.refused = true
@@ -425,6 +490,7 @@ func (r *BlobReceiver) abort(x *blobXfer, why string) bool {
 		x.file.Close()
 	}
 	os.Remove(filepath.Join(r.dir, ".partial", x.hdr.ID))
+	os.Remove(filepath.Join(r.dir, ".partial", x.hdr.ID+headerSidecarExt))
 	r.note(fmt.Sprintf("discarded a corrupt transfer of %s from %s (%s)", x.hdr.Name, x.from, why))
 	r.receipt(x, false, why)
 	return false
@@ -450,10 +516,12 @@ func (r *BlobReceiver) finish(x *blobXfer) bool {
 		r.rejected[x.hdr.ID] = struct{}{}
 		delete(r.open, x.hdr.ID)
 		os.Remove(filepath.Join(r.dir, ".partial", x.hdr.ID))
+		os.Remove(filepath.Join(r.dir, ".partial", x.hdr.ID+headerSidecarExt))
 		r.note(fmt.Sprintf("could not publish %s from %s: %v", x.hdr.Name, x.from, err))
 		r.receipt(x, false, "publish-error")
 		return false
 	}
+	os.Remove(filepath.Join(r.dir, ".partial", x.hdr.ID+headerSidecarExt))
 	x.final = final
 	return r.notifyPublished(x)
 }

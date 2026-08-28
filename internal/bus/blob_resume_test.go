@@ -55,6 +55,51 @@ func TestBlobReceiverResumesPartialAfterRestart(t *testing.T) {
 	}
 }
 
+// The real #50 review scenario: a FRESH BlobReceiver (nothing offered
+// the header — the header's envelope was already ACKed and forgotten
+// by the hub before the restart) must still accept chunks for an
+// in-progress transfer, reconstructing the header from its sidecar.
+func TestBlobReceiverResumesWithoutHeaderReplay(t *testing.T) {
+	dir := t.TempDir()
+	content := bytes.Repeat([]byte("sidecar-resume "), 9000) // ~135KB
+	frames := BlobFrames("sidecar-id", "big2.bin", content, 16<<10)
+	header, chunks := frames[0], frames[1:]
+
+	r1 := NewBlobReceiver(dir, 0, func(string) {})
+	if _, ok := r1.Offer("alice", header); !ok {
+		t.Fatal("header refused")
+	}
+	for i := 0; i < 4; i++ {
+		if _, ok := r1.Offer("alice", chunks[i]); !ok {
+			t.Fatalf("chunk %d refused", i+1)
+		}
+	}
+
+	// Fresh receiver: NO header offered. Its open map is empty — the
+	// only record of this transfer is the sidecar on disk.
+	var note string
+	r2 := NewBlobReceiver(dir, 0, func(l string) { note = l })
+	for i := 4; i < len(chunks); i++ {
+		if _, ok := r2.Offer("alice", chunks[i]); !ok {
+			t.Fatalf("chunk %d refused with no header replay", i+1)
+		}
+	}
+	if !strings.Contains(note, "FILE") {
+		t.Fatalf("transfer did not complete without header replay: %q", note)
+	}
+	path := note[strings.LastIndex(note, " ")+1:]
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatal("sidecar-resumed blob corrupted")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".partial", "sidecar-id.hdr")); !os.IsNotExist(err) {
+		t.Fatal("sidecar not cleaned up after successful completion")
+	}
+}
+
 // A torn tail (crash mid-write before the fsync) is trimmed to whole
 // chunks on resume, and the retransmitted chunk fills the gap.
 func TestBlobReceiverResumeTrimsTornTail(t *testing.T) {
