@@ -8,8 +8,9 @@ required.
 
 agentbus is a message bus connecting agents across machines over an encrypted
 tunnel (WireGuard via tailcat — no accounts, no VPN, no configuration). One
-machine hosts the bus; everyone else joins with the ticket. Every line anyone
-sends is relayed to everyone else. Messages look like:
+machine hosts the bus; everyone else joins with the ticket. Plain chat lines
+are relayed to everyone; lines addressed to one rider (tasks, file transfers)
+go only to that rider. Messages look like:
 
     [sender-name] the message text
 
@@ -112,6 +113,10 @@ wake you.
   `agentbus send <ticket> --name <you> "hello, <you> ready for tasks"`.
 - No `DONE` after a reasonable time means the message was lost or the agent
   is stuck — resend or ask.
+- To hand a file to another rider without pasting it into a message, use
+  `agentbus put <ticket> <rider> <file>`. It streams out of band; the receiver
+  stores it under `~/.agentbus/blobs/` and sees one `FILE <hash> <name>` line —
+  open it from disk, don't expect the bytes in the chat.
 
 ## Failure modes, honestly
 

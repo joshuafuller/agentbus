@@ -12,7 +12,7 @@ being the copy-paste bus.*
 ![Status](https://img.shields.io/badge/status-experimental%20·%20walking%20skeleton-orange)
 [![CI](https://github.com/joshuafuller/agentbus/actions/workflows/ci.yml/badge.svg)](https://github.com/joshuafuller/agentbus/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)
-![Release](https://img.shields.io/badge/release-v0.3.0-blue)
+![Release](https://img.shields.io/badge/release-v0.3.1-blue)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-lightgrey)
 ![Transport](https://img.shields.io/badge/transport-WireGuard%C2%AE%20via%20tailcat-88171A)
 ![Model](https://img.shields.io/badge/works%20with-Claude%20Code%20%C2%B7%20Codex-7C3AED)
@@ -56,9 +56,10 @@ but the point is collaboration, made as frictionless as it can be.
 > - **Barely tested by real-world standards.** Activation and multi-rider
 >   fan-out are verified on one host; WAN traversal, adversarial peers, and
 >   long-running stability are **not** yet.
-> - **Known-open holes**, named not hidden: no sender authentication (anyone
->   can claim any name), no per-rider revocation, no offline delivery. See
->   [SECURITY.md](SECURITY.md).
+> - **Known-open holes**, named not hidden: unbound names are unauthenticated
+>   (TOFU binds a name to the first key that proves it, but a never-claimed
+>   name can still be taken), no per-rider revocation, and no key recovery if a
+>   rider loses its key. See [SECURITY.md](SECURITY.md).
 >
 > Run it on machines where autonomous code execution by whoever holds the
 > ticket is an acceptable trade — and read the threat model first. We are
@@ -224,9 +225,12 @@ flowchart LR
 | `agentbus host` | start a bus, print its ticket |
 | `agentbus join <ticket>` | ride the bus (stays connected) |
 | `agentbus send <ticket> <msg>` | send one message and exit |
+| `agentbus task <ticket> <rider> <msg>` | send an A2A task to one rider and follow it to completion or failure |
+| `agentbus put <ticket> <rider> <file>` | stream a file to one rider out of band; the agent sees one FILE line, not the bytes |
 | `agentbus wire claude\|codex <ticket>` | one-command wake wiring for an agent runtime |
 | `agentbus await` | block until unread messages exist, print them, remember the position |
 | `agentbus invite <ticket>` | print the copy-paste boarding pass |
+| `agentbus version` | print version, commit, and build date |
 
 All take `--name`; receivers take `--inbox <file>` and/or
 `--on-msg <cmd>` (message arrives in `$AGENTBUS_MSG`, `$AGENTBUS_FROM`,
@@ -276,8 +280,9 @@ about.
   pins it and upgrades deliberately.
 
 What you don't get is also what you don't pay for: no queues to
-reconcile, no ledgers to debug, no state to clean up. `kill` leaves
-nothing behind.
+reconcile, no ledgers to debug. `kill` leaves almost nothing behind —
+the only on-disk state is the host's 24h addressed-line spool and each
+rider's key/inbox under `~/.agentbus/`, both safe to delete.
 
 ## Install
 
