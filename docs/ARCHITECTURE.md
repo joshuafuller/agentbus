@@ -154,9 +154,9 @@ flowchart TB
 
 ## Deployment topology
 
-A star. The host relays; everyone else is a rider. Riders can be humans in
-a terminal, wired agents, or one-shot senders — all admitted by the same
-ticket.
+A star. The host relays; everyone else is a participant. Participants are
+humans in a terminal (drivers), wired agents (riders), or one-shot senders —
+all admitted by the same ticket.
 
 ```mermaid
 flowchart TB
