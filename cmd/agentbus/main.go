@@ -616,13 +616,36 @@ func runSendConn(conn net.Conn, name, to, msg string, key ed25519.PrivateKey) er
 	if !strings.Contains(sc.Text(), "welcome aboard") {
 		return fmt.Errorf("bus refused this connection: %s", sc.Text())
 	}
+	sent := 0
 	for _, line := range strings.Split(msg, "\n") {
 		if line = strings.TrimSpace(line); line != "" {
 			if to != "" {
 				line = bus.Addressed(to, line)
 			}
 			fmt.Fprintf(conn, "%s\n", line)
+			sent++
 		}
+	}
+	if to != "" {
+		// An addressed send is a durability contract: exit 0 only once
+		// the hub confirms each line is durably in its hands. Without
+		// this a full spool disk loses the line while send reports
+		// success (PR #47 review, P1).
+		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		for confirmed := 0; confirmed < sent; {
+			if !sc.Scan() {
+				return fmt.Errorf("no delivery confirmation from the bus (line may be lost): %v", sc.Err())
+			}
+			ok, reason, isReceipt := bus.ParseSendReceipt(sc.Text())
+			if !isReceipt {
+				continue // unrelated traffic; keep waiting for receipts
+			}
+			if !ok {
+				return fmt.Errorf("the bus did not accept the line: %s", reason)
+			}
+			confirmed++
+		}
+		return nil
 	}
 	// Brief linger so the tunnel flushes and ACKs before teardown.
 	conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))

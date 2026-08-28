@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -154,6 +155,32 @@ func TestSendWithoutToStillBroadcasts(t *testing.T) {
 			t.Fatalf("broadcast not seen by everyone: bob=%v carol=%v", bobGot(), carolGot())
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// failingSpool errors on every Add — the disk-full / read-only host.
+type failingSpool struct{}
+
+func (failingSpool) Add(rider, line string) (string, error) {
+	return "", errFull
+}
+func (failingSpool) Offer(rider string, accept func(id, line string) bool) error { return nil }
+func (failingSpool) Remove(rider, id string) error                               { return nil }
+func (failingSpool) Pending(rider string) int                                    { return 0 }
+
+var errFull = fmt.Errorf("spool full")
+
+// Codex review on #47 (P1): when the host cannot durably spool an
+// addressed line, `send --to` must FAIL, not exit 0 while the line is
+// silently lost — the sender is a one-shot peer that broadcast notices
+// deliberately skip, so an explicit receipt is the only honest channel.
+func TestSendToReportsSpoolFailure(t *testing.T) {
+	h := bus.NewHub("host", nil)
+	h.Spool = failingSpool{}
+
+	err := runSendConn(requesterConn(t, h), "alice", "bob", "TASK t9 doomed", nil)
+	if err == nil {
+		t.Fatal("send --to reported success while the hub lost the line")
 	}
 }
 

@@ -569,13 +569,18 @@ func (h *Hub) deliverAddressed(from, to, payload string, via net.Conn) {
 	h.mu.Lock()
 	var hostEnvelope string
 	var spoolNotice string
+	// accepted means the line is durably in the hub's hands (spooled,
+	// or on legacy no-spool paths delivered/attempted directly). It
+	// backs the receipt to one-shot senders below.
+	accepted := true
 	switch {
 	case toHost && h.Spool != nil:
 		hostEnvelope, spoolNotice = h.addHostEnvelope(from, to, line, payload)
+		accepted = hostEnvelope != ""
 	case toHost:
 		// Legacy no-spool hub: direct sink delivery.
 	case h.Spool != nil:
-		spoolNotice = h.spoolForRider(to, line, via)
+		spoolNotice, accepted = h.spoolForRider(to, line, via)
 	default:
 		// Legacy no-spool hub: best-effort direct delivery, loudly
 		// lossy when nobody holds the name.
@@ -589,11 +594,25 @@ func (h *Hub) deliverAddressed(from, to, payload string, via net.Conn) {
 			// DrainLocal on the next start.
 			h.sink(hostEnvelope)
 		} else {
-			h.sink(line)
+			accepted = h.sink(line)
 		}
 	}
 	if spoolNotice != "" {
 		h.notice(spoolNotice, nil)
+	}
+	// One-shot senders get an explicit delivery receipt: they receive
+	// no relays and no broadcast notices, so without it a fire-and-
+	// forget send exits 0 while the hub lost the line (PR #47 review).
+	if via != nil {
+		h.mu.Lock()
+		if p, ok := h.peers[via]; ok && p.oneshot {
+			if accepted {
+				enqueue(via, p, SendOK())
+			} else {
+				enqueue(via, p, SendErr("the bus could not durably accept the line for "+to))
+			}
+		}
+		h.mu.Unlock()
 	}
 	if h.TaskNotice != nil {
 		if n, ok := h.TaskNotice(from, to, payload); ok {
@@ -623,9 +642,9 @@ func (h *Hub) addHostEnvelope(from, to, line, payload string) (hostEnvelope, spo
 // single queue, oldest first. Disk I/O under h.mu is the price of
 // making the add atomic with join/leave; one small line each.
 // Caller holds h.mu.
-func (h *Hub) spoolForRider(to, line string, via net.Conn) string {
+func (h *Hub) spoolForRider(to, line string, via net.Conn) (notice string, accepted bool) {
 	if _, err := h.Spool.Add(to, line); err != nil {
-		return fmt.Sprintf("could not spool for %s: %v — line lost", to, err)
+		return fmt.Sprintf("could not spool for %s: %v — line lost", to, err), false
 	}
 	present := false
 	for conn, p := range h.peers {
@@ -638,9 +657,9 @@ func (h *Hub) spoolForRider(to, line string, via net.Conn) string {
 		}
 	}
 	if !present {
-		return fmt.Sprintf("%s is away — line spooled (%d pending)", to, h.Spool.Pending(to))
+		return fmt.Sprintf("%s is away — line spooled (%d pending)", to, h.Spool.Pending(to)), true
 	}
-	return ""
+	return "", true
 }
 
 // deliverDirectLocked is the legacy no-spool path: best-effort direct
