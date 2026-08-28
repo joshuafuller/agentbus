@@ -224,6 +224,7 @@ func runHost(name, onMsg string, sink *bus.Sink) error {
 		blobDir := filepath.Join(home, ".agentbus", "blobs")
 		if err := os.MkdirAll(blobDir, 0o700); err == nil {
 			blobs = bus.NewBlobReceiver(blobDir, 0, func(l string) { sink.Deliver(l) })
+			blobs.Notify = sink.Deliver
 		}
 	}
 	hub = bus.NewHub(name, hostSink(hostRider, sink.Deliver,
@@ -388,6 +389,7 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 		blobDir := filepath.Join(home, ".agentbus", "blobs")
 		if err := os.MkdirAll(blobDir, 0o700); err == nil {
 			blobs = bus.NewBlobReceiver(blobDir, 0, func(l string) { sink.Deliver(l) })
+			blobs.Notify = sink.Deliver
 			// The delivery receipt goes back to the sender as an
 			// addressed line, so `put` knows the bytes landed.
 			blobs.Reply = func(to, line string) { sendLine(bus.Addressed(to, line)) }

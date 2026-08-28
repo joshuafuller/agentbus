@@ -141,6 +141,9 @@ type BlobReceiver struct {
 	dir  string
 	cap  int64
 	note func(string) // the one line the agent sees per transfer
+	// Notify, if set, reports whether the agent accepted the completion
+	// notification. A false result must not become a successful transfer.
+	Notify func(string) bool
 	// Reply, if set, sends a delivery receipt addressed back to the
 	// sender: "BLOB OK <id>" on success, "BLOB ERR <id> <why>" on
 	// refusal or corruption. It lets `put` block until the bytes have
@@ -347,9 +350,19 @@ func (r *BlobReceiver) finish(x *blobXfer) bool {
 		r.receipt(x, false, "publish-error")
 		return false
 	}
+	line := fmt.Sprintf("[%s] FILE %s %s %dB → %s", x.from, got[:8], x.hdr.Name, x.got, final)
 	delete(r.open, x.hdr.ID)
+	if r.Notify != nil {
+		if !r.Notify(line) {
+			// The bytes are durable, but the agent has not accepted the
+			// only notification that makes them discoverable. Leave the
+			// transfer unacknowledged so the envelope owner can retry.
+			return false
+		}
+	} else {
+		r.note(line)
+	}
 	r.completed[x.hdr.ID] = struct{}{}
-	r.note(fmt.Sprintf("[%s] FILE %s %s %dB → %s", x.from, got[:8], x.hdr.Name, x.got, final))
 	r.receipt(x, true, "")
 	return true
 }
