@@ -393,38 +393,53 @@ var errJoinPermanent = fmt.Errorf("permanent")
 // queues lines produced while no session is live — a task worker
 // finishing mid-reconnect must not write its terminal snapshot to a
 // dead socket and lose it (PR #48 review, P1). Queued lines flush, in
-// order, when the next session attaches.
+// order, when the next session attaches. Writers report errors, and a
+// FAILED write re-queues the line instead of dropping it — the send-
+// vs-detach race the #49 review found: Send could copy the old writer,
+// lose w.mu, write to the just-closed socket, and the ignored error
+// left the line neither delivered nor queued.
 type reconnectWriter struct {
 	mu      sync.Mutex
-	current func(string)
+	current func(string) error
+	gen     int // bumped by every Attach; detects a changed world
 	pending []string
 }
 
-// Send writes through the live session, or queues until one attaches.
+// Send writes through the live session. A failed or writer-less send
+// queues the line for the next attach — unless a NEW session attached
+// meanwhile (gen moved), in which case it retries through that one.
 func (w *reconnectWriter) Send(line string) {
-	w.mu.Lock()
-	f := w.current
-	if f == nil {
-		w.pending = append(w.pending, line)
+	for {
+		w.mu.Lock()
+		f, gen := w.current, w.gen
 		w.mu.Unlock()
-		return
+		if f != nil && f(line) == nil {
+			return
+		}
+		w.mu.Lock()
+		if w.gen == gen {
+			w.pending = append(w.pending, line)
+			w.mu.Unlock()
+			return
+		}
+		w.mu.Unlock() // the world changed mid-send: retry against it
 	}
-	w.mu.Unlock()
-	f(line)
 }
 
 // Attach makes f the live writer and flushes everything queued while
-// disconnected, oldest first. Attach(nil) detaches (queueing resumes).
-func (w *reconnectWriter) Attach(f func(string)) {
+// disconnected, oldest first (a flush failure re-queues via Send).
+// Attach(nil) detaches: queueing resumes.
+func (w *reconnectWriter) Attach(f func(string) error) {
 	w.mu.Lock()
 	w.current = f
+	w.gen++
 	var p []string
 	if f != nil {
 		p, w.pending = w.pending, nil
 	}
 	w.mu.Unlock()
 	for _, line := range p {
-		f(line)
+		w.Send(line)
 	}
 }
 
@@ -523,13 +538,17 @@ func joinSession(ticket, name string, sink *bus.Sink, key ed25519.PrivateKey, ri
 
 	// The conn is written from stdin forwarding, and — when this join
 	// is a wired rider — from task goroutines reporting state. Guard it
-	// so concurrent lines never interleave mid-line.
+	// so concurrent lines never interleave mid-line. The error matters:
+	// a failed write through the reconnectWriter re-queues the line for
+	// the next session instead of losing it (#49 review, P1).
 	var writeMu sync.Mutex
-	sendLine := func(line string) {
+	sendLineErr := func(line string) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		fmt.Fprintf(conn, "%s\n", line)
+		_, err := fmt.Fprintf(conn, "%s\n", line)
+		return err
 	}
+	sendLine := func(line string) { sendLineErr(line) }
 
 	sc := bufio.NewScanner(conn)
 	// The hub accepts lines up to 256KB; the default 64KB token limit
@@ -566,7 +585,7 @@ func joinSession(ticket, name string, sink *bus.Sink, key ed25519.PrivateKey, ri
 	// stdin line sent between HELLO and SIG would be read as handshake
 	// traffic and get the connection refused (PR #20 review, P1).
 	// Attaching also flushes task output queued during the disconnect.
-	w.Attach(sendLine)
+	w.Attach(sendLineErr)
 	// Probe immediately: the first PONG proves this host answers
 	// heartbeats, which arms the liveness deadline below.
 	sendLine(bus.Ping())
