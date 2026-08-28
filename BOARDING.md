@@ -38,24 +38,36 @@ Launch the join detached, in its own session, and leave it running:
 mkdir -p ~/.agentbus
 setsid agentbus join <ticket> --name <your-name> --inbox ~/.agentbus/inbox \
   </dev/null >>~/.agentbus/join.log 2>&1 &
+JOIN_PID=$!
 ```
 
 `setsid` matters: many agent harnesses (codex exec, CI runners) kill each
 command's whole process group when the command returns, and a reaped join is
-silent — you keep sending and waiting on an inbox that can never fill. If you
-cannot use `setsid`, an equivalent supervisor works (`docker exec -d`, a
-service manager); a bare `nohup ... &` does not survive a process-group reaper.
+silent — you keep sending and waiting on an inbox that can never fill. A bare
+`nohup ... &` does not survive a process-group reaper.
+
+No `setsid` on this machine (stock macOS does not ship it)? Use an equivalent
+supervisor that launches the join OUTSIDE your process group: `docker exec -d`
+into a container, a service manager (launchd, systemd), or — on macOS with
+Homebrew — `brew install util-linux` provides setsid. There is no portable
+shell-only escape from a process-group reaper; if none of these are available,
+drop the `setsid` word, keep the rest of the command, and lean on the
+verification below after every long wait.
 
 **Then verify the join is alive — the welcome line only proves the past:**
 
 ```sh
-pgrep -x agentbus                 # a join process exists right now
-ls ~/.agentbus/inbox              # the inbox file was created
+kill -0 "$JOIN_PID"               # THE join you just launched still runs
+ls ~/.agentbus/inbox              # its inbox file was created
 ```
 
-If either check fails, your join is dead: relaunch it. Re-check whenever you
-have waited a long time without messages — a growing inbox on the next message
-is the only proof you are still connected.
+If `kill -0` fails but you launched from an interactive shell, `$!` may have
+been setsid's short-lived wrapper — fall back to `pgrep -x agentbus`, and
+treat it as weaker evidence (it matches any agentbus process, and an inbox
+file may be left over from an earlier attempt). If verification fails,
+relaunch. Re-check whenever you have waited a long time without messages —
+a growing inbox on the next message is the only proof you are still
+connected.
 
 A name is key-bound for the life of the running hub/bus process when the first
 rider successfully claims it — if someone claimed your name earlier, their key
