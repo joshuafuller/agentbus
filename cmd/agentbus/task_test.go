@@ -2,8 +2,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"fmt"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -119,7 +123,7 @@ func TestHostSinkRoutesTasksToRider(t *testing.T) {
 		Send:   func(string) {},
 	}
 	sink := func(line string) bool { delivered <- line; return true }
-	route := hostSink(r, sink, nil, bus.NewDedup(64))
+	route := hostSink(r, sink, nil, bus.NewDedup(64), nil)
 
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("host task"))
 	route(bus.Message("alice", task.EncodeMessage(msg)))
@@ -147,7 +151,7 @@ func TestHostSinkRoutesTasksToRider(t *testing.T) {
 
 func TestHostSinkRendersForDriverHost(t *testing.T) {
 	delivered := make(chan string, 2)
-	route := hostSink(nil, func(line string) bool { delivered <- line; return true }, nil, bus.NewDedup(64))
+	route := hostSink(nil, func(line string) bool { delivered <- line; return true }, nil, bus.NewDedup(64), nil)
 
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("x"))
 	tk := a2a.NewSubmittedTask(msg, msg)
@@ -158,6 +162,98 @@ func TestHostSinkRendersForDriverHost(t *testing.T) {
 	}
 	if !strings.Contains(l, "submitted") {
 		t.Fatalf("driver host line %q missing state", l)
+	}
+}
+
+func exerciseHostSinkStoresBlob(t *testing.T, rider *task.Rider) {
+	t.Helper()
+	dir := t.TempDir()
+	blobs := bus.NewBlobReceiver(dir, 0, func(string) {})
+	receipts := make(chan string, 1)
+	blobs.Reply = func(to, line string) { receipts <- bus.Message(to, line) }
+	var acked []string
+	delivered := make(chan string, 8)
+	route := hostSink(rider, func(line string) bool {
+		delivered <- line
+		return true
+	}, func(id string) { acked = append(acked, id) }, bus.NewDedup(64), blobs)
+
+	content := []byte("host-local blob")
+	frames := bus.BlobFrames("hostblob", "artifact.bin", content, 4)
+	for i, frame := range frames {
+		if !route(bus.Message("alice", bus.Envelope(fmt.Sprintf("env-%d", i), frame))) {
+			t.Fatalf("host rejected blob frame %d", i)
+		}
+	}
+	select {
+	case line := <-delivered:
+		t.Fatalf("blob frame leaked to host sink: %q", line)
+	default:
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []byte
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			got, err = os.ReadFile(filepath.Join(dir, entry.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("host blob content = %q, want %q", got, content)
+	}
+	if len(acked) != len(frames) {
+		t.Fatalf("acked %d blob envelopes, want %d", len(acked), len(frames))
+	}
+	select {
+	case receipt := <-receipts:
+		if receipt != bus.Message("alice", "BLOB OK hostblob") {
+			t.Fatalf("receipt = %q", receipt)
+		}
+	default:
+		t.Fatal("host did not route a blob receipt")
+	}
+}
+
+func TestHostSinkStoresAddressedBlob(t *testing.T) {
+	exerciseHostSinkStoresBlob(t, nil)
+}
+
+func TestHostRiderStoresAddressedBlob(t *testing.T) {
+	exerciseHostSinkStoresBlob(t, &task.Rider{
+		Dir:    t.TempDir(),
+		Runner: func(string) (string, error) { return "", nil },
+	})
+}
+
+func TestHostSinkWithholdsAckWhenBlobNoticeRejected(t *testing.T) {
+	blobs := bus.NewBlobReceiver(t.TempDir(), 0, func(string) {})
+	blobs.Notify = func(string) bool { return false }
+	receipts := make(chan string, 1)
+	blobs.Reply = func(to, line string) { receipts <- bus.Message(to, line) }
+	var acked []string
+	route := hostSink(nil, func(string) bool { return true }, func(id string) {
+		acked = append(acked, id)
+	}, bus.NewDedup(64), blobs)
+
+	for i, frame := range bus.BlobFrames("rejected-note", "artifact.bin", []byte("data"), 4) {
+		if !route(bus.Message("alice", bus.Envelope(fmt.Sprintf("env-%d", i), frame))) {
+			t.Fatalf("host rejected frame %d before notice delivery", i)
+		}
+	}
+	if len(acked) != 0 {
+		t.Fatalf("acked %d envelopes after FILE notice refusal", len(acked))
+	}
+	select {
+	case receipt := <-receipts:
+		t.Fatalf("sent success receipt after FILE notice refusal: %q", receipt)
+	default:
 	}
 }
 

@@ -43,6 +43,8 @@ Usage:
   agentbus version                      print version information
   agentbus task <ticket> <rider> <msg>  send an A2A task to one rider and
                                         follow it to completion or failure
+  agentbus put <ticket> <rider> <file>  stream a file to one rider out of
+                                        band; the agent sees one FILE line
   agentbus invite <ticket> [flags]      print a copy-paste boarding pass
                                         that onboards a fresh agent
   agentbus await [--inbox <file>]       block until unread messages exist,
@@ -115,6 +117,16 @@ func main() {
 			os.Exit(2)
 		}
 		err = runTask(ticket, *name, fs.Arg(0), strings.Join(fs.Args()[1:], " "), *timeout)
+	case "put":
+		ticket, rest := popTicket(args)
+		timeout := fs.Duration("timeout", 10*time.Minute, "give up if the transfer has not finished by then")
+		fs.Parse(rest)
+		validateName()
+		if fs.NArg() < 2 {
+			fmt.Fprintln(os.Stderr, "agentbus: put needs a rider name and a file path")
+			os.Exit(2)
+		}
+		err = runPut(ticket, *name, fs.Arg(0), fs.Arg(1), *timeout)
 	case "await":
 		fs.Parse(args)
 		err = runAwait(*inbox)
@@ -194,6 +206,7 @@ func runHost(name, onMsg string, sink *bus.Sink) error {
 	// payloads readable.
 	var hub *bus.Hub
 	var hostRider *task.Rider
+	var blobs *bus.BlobReceiver
 	if onMsg != "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -207,8 +220,21 @@ func runHost(name, onMsg string, sink *bus.Sink) error {
 			Send:  func(line string) { hub.Broadcast(line) },
 			Acked: func(id string) { hub.AckLocal(id) }}
 	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("blob spool: %w", err)
+	}
+	blobs, err = blobReceiverAt(home, sink.Deliver)
+	if err != nil {
+		return err
+	}
 	hub = bus.NewHub(name, hostSink(hostRider, sink.Deliver,
-		func(id string) { hub.AckLocal(id) }, bus.NewDedup(1024)))
+		func(id string) { hub.AckLocal(id) }, bus.NewDedup(1024), blobs))
+	if blobs != nil {
+		// Host-local blob receipts must be addressed back to the put
+		// requester, just like receipts from a remote join.
+		blobs.Reply = func(to, line string) { hub.Broadcast(bus.Addressed(to, line)) }
+	}
 	hub.OnNotice = func(line string) { fmt.Println(line) }
 	// Task lifecycle transitions become feed notices every driver sees
 	// (issue #12). Injected here because bus cannot import task.
@@ -277,6 +303,16 @@ func riderDir(name string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".agentbus", "rider-"+name), nil
+}
+
+func blobReceiverAt(home string, deliver func(string) bool) (*bus.BlobReceiver, error) {
+	dir := filepath.Join(home, ".agentbus", "blobs")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("create blob spool %s: %w", dir, err)
+	}
+	blobs := bus.NewBlobReceiver(dir, 0, func(l string) { deliver(l) })
+	blobs.Notify = deliver
+	return blobs, nil
 }
 
 func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
@@ -357,9 +393,24 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 			}
 		}
 	}()
+	// Blob transfers (issue #2) reassemble into a content-addressed
+	// spool; the agent gets one FILE notice per file, never the bytes.
+	var blobs *bus.BlobReceiver
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("blob spool: %w", err)
+	}
+	blobs, err = blobReceiverAt(home, sink.Deliver)
+	if err != nil {
+		return err
+	}
+	// The delivery receipt goes back to the sender as an addressed line,
+	// so `put` knows the bytes landed.
+	blobs.Reply = func(to, line string) { sendLine(bus.Addressed(to, line)) }
 	// At-least-once delivery: the hub redelivers unACKed envelopes, so
 	// remember recent ids and re-ACK duplicates without reprocessing.
 	seen := bus.NewDedup(1024)
+	blobEnvelopes := map[string]map[string]struct{}{}
 	for sc.Scan() {
 		line := sc.Text()
 		if bus.IsNotice(line) {
@@ -368,6 +419,12 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 		}
 		from, body, isMsg := bus.ParseMessage(line)
 		if isMsg {
+			// Blob frames may arrive directly from a no-envelope
+			// delivery path. Let the blob receiver claim them before the
+			// envelope-specific task and chat handling below.
+			if _, _, enveloped := bus.ParseEnvelope(body); !enveloped && offerUnwrappedBlob(blobs, from, body) {
+				continue
+			}
 			if id, payload, isEnv := bus.ParseEnvelope(body); isEnv {
 				if rider != nil {
 					if _, isTask := task.DecodeMessage(payload); isTask {
@@ -385,6 +442,38 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 				if seen.Has(id) {
 					sendLine(bus.Ack(id)) // duplicate chat: re-ACK, don't reprocess
 					continue
+				}
+				// A blob frame is spooled out of band, not delivered to
+				// the agent. Hold every frame ACK until the receiver has
+				// durably published the complete blob.
+				if blobs != nil {
+					if consumed, ok := blobs.Offer(from, payload); consumed {
+						if blobID := blobFrameID(payload); blobID != "" {
+							pending := blobEnvelopes[blobID]
+							if pending == nil {
+								pending = map[string]struct{}{}
+								blobEnvelopes[blobID] = pending
+							}
+							pending[id] = struct{}{}
+							if ok && blobs.TakeCompleted(blobID) {
+								for envelopeID := range pending {
+									seen.Seen(envelopeID)
+									sendLine(bus.Ack(envelopeID))
+								}
+								delete(blobEnvelopes, blobID)
+							} else if blobs.TakeDuplicate(blobID) {
+								seen.Seen(id)
+								sendLine(bus.Ack(id))
+							} else if blobs.TakeRejected(blobID) {
+								for envelopeID := range pending {
+									seen.Seen(envelopeID)
+									sendLine(bus.Ack(envelopeID))
+								}
+								delete(blobEnvelopes, blobID)
+							}
+						}
+						continue
+					}
 				}
 				// Record the id only AFTER acceptance: marking first
 				// would turn a failed delivery's redelivery into an
@@ -442,6 +531,32 @@ func runAwait(inbox string) error {
 		fmt.Println(l)
 	}
 	return nil
+}
+
+func blobFrameID(payload string) string {
+	if h, ok := bus.ParseBlobHeader(payload); ok {
+		return h.ID
+	}
+	if id, _, _, ok := bus.ParseBlobChunk(payload); ok {
+		return id
+	}
+	return ""
+}
+
+func offerUnwrappedBlob(blobs *bus.BlobReceiver, from, payload string) bool {
+	if blobs == nil {
+		return false
+	}
+	consumed, _ := blobs.Offer(from, payload)
+	if !consumed {
+		return false
+	}
+	if blobID := blobFrameID(payload); blobID != "" {
+		blobs.TakeCompleted(blobID)
+		blobs.TakeDuplicate(blobID)
+		blobs.TakeRejected(blobID)
+	}
+	return true
 }
 
 func runSend(ticket, name, msg string) error {

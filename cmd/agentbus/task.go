@@ -198,7 +198,8 @@ func driverLine(line string) string {
 // SUBMITTED persist (wired through Rider.Acked by the caller), chat
 // ACKs after the sink accepts; a refusal leaves the entry spooled for
 // DrainLocal. The returned bool reports sink-level acceptance.
-func hostSink(rider *task.Rider, sink func(line string) bool, ackLocal func(id string), seen *bus.Dedup) func(line string) bool {
+func hostSink(rider *task.Rider, sink func(line string) bool, ackLocal func(id string), seen *bus.Dedup, blobs *bus.BlobReceiver) func(line string) bool {
+	blobEnvelopes := map[string]map[string]struct{}{}
 	return func(line string) bool {
 		from, body, ok := bus.ParseMessage(line)
 		if !ok {
@@ -206,11 +207,58 @@ func hostSink(rider *task.Rider, sink func(line string) bool, ackLocal func(id s
 		}
 		payload := body
 		envID := ""
+		isEnvelope := false
 		if id, p, isEnv := bus.ParseEnvelope(body); isEnv {
+			isEnvelope = true
 			envID, payload = id, p
-			if seen != nil && seen.Seen(envID) {
+			if seen != nil && seen.Has(envID) {
 				if ackLocal != nil {
 					ackLocal(envID)
+				}
+				return true
+			}
+		}
+		if blobs != nil {
+			if !isEnvelope {
+				if offerUnwrappedBlob(blobs, from, payload) {
+					return true
+				}
+			} else if consumed, accepted := blobs.Offer(from, payload); consumed {
+				blobID := blobFrameID(payload)
+				pending := blobEnvelopes[blobID]
+				if pending == nil {
+					pending = map[string]struct{}{}
+					blobEnvelopes[blobID] = pending
+				}
+				pending[envID] = struct{}{}
+				switch {
+				case accepted && blobs.TakeCompleted(blobID):
+					for id := range pending {
+						if seen != nil {
+							seen.Seen(id)
+						}
+						if ackLocal != nil {
+							ackLocal(id)
+						}
+					}
+					delete(blobEnvelopes, blobID)
+				case blobs.TakeDuplicate(blobID):
+					if seen != nil {
+						seen.Seen(envID)
+					}
+					if ackLocal != nil {
+						ackLocal(envID)
+					}
+				case blobs.TakeRejected(blobID):
+					for id := range pending {
+						if seen != nil {
+							seen.Seen(id)
+						}
+						if ackLocal != nil {
+							ackLocal(id)
+						}
+					}
+					delete(blobEnvelopes, blobID)
 				}
 				return true
 			}
