@@ -389,6 +389,45 @@ func blobReceiverAt(home string, deliver func(string) bool) (*bus.BlobReceiver, 
 // fighting over one name forever.
 var errJoinPermanent = fmt.Errorf("permanent")
 
+// reconnectWriter hands lines to the current session's conn writer and
+// queues lines produced while no session is live — a task worker
+// finishing mid-reconnect must not write its terminal snapshot to a
+// dead socket and lose it (PR #48 review, P1). Queued lines flush, in
+// order, when the next session attaches.
+type reconnectWriter struct {
+	mu      sync.Mutex
+	current func(string)
+	pending []string
+}
+
+// Send writes through the live session, or queues until one attaches.
+func (w *reconnectWriter) Send(line string) {
+	w.mu.Lock()
+	f := w.current
+	if f == nil {
+		w.pending = append(w.pending, line)
+		w.mu.Unlock()
+		return
+	}
+	w.mu.Unlock()
+	f(line)
+}
+
+// Attach makes f the live writer and flushes everything queued while
+// disconnected, oldest first. Attach(nil) detaches (queueing resumes).
+func (w *reconnectWriter) Attach(f func(string)) {
+	w.mu.Lock()
+	w.current = f
+	var p []string
+	if f != nil {
+		p, w.pending = w.pending, nil
+	}
+	w.mu.Unlock()
+	for _, line := range p {
+		f(line)
+	}
+}
+
 // runJoin keeps a rider on the bus across disconnects (#34): a host
 // restart resumes the same ticket, so the right rider behavior is to
 // redial with backoff, not to die and leave a deaf agent. Only a
@@ -405,35 +444,44 @@ func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
 		return err
 	}
 
-	// Stdin forwarding outlives any one connection: lines go to the
-	// currently live session's writer (dropped while disconnected —
-	// stdin is the interactive path; agents send via one-shots).
-	var sendMu sync.Mutex
-	var curSend func(string)
-	setSend := func(f func(string)) {
-		sendMu.Lock()
-		curSend = f
-		sendMu.Unlock()
-	}
+	// One writer outlives every session: stdin lines and task-worker
+	// output follow the live connection, and worker lines produced
+	// mid-reconnect queue instead of dying with the old socket.
+	w := &reconnectWriter{}
 	go func() {
 		sc := bufio.NewScanner(os.Stdin)
 		for sc.Scan() {
 			if t := strings.TrimSpace(sc.Text()); t != "" {
-				sendMu.Lock()
-				f := curSend
-				sendMu.Unlock()
-				if f != nil {
-					f(t)
-				}
+				w.Send(t)
 			}
 		}
 	}()
 
+	// The task rider is created ONCE and survives session retries: its
+	// workers hold Send/Acked closures, and per-session closures would
+	// bind a running task's DONE snapshot to a connection that no
+	// longer exists (PR #48 review, P1).
+	var rider *task.Rider
+	if onMsg != "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		dir := filepath.Join(home, ".agentbus", "rider-"+name, "tasks")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		rider = &task.Rider{Dir: dir, Runner: execRunner(onMsg), Send: w.Send,
+			// ACK a task envelope only once its SUBMITTED snapshot is
+			// on disk — the hub then forgets its spooled copy.
+			Acked: func(id string) { w.Send(bus.Ack(id)) }}
+	}
+
 	backoff := time.Second
 	for {
 		start := time.Now()
-		err := joinSession(ticket, name, onMsg, sink, key, setSend)
-		setSend(nil)
+		err := joinSession(ticket, name, sink, key, rider, w)
+		w.Attach(nil)
 		if errors.Is(err, errJoinPermanent) {
 			return err
 		}
@@ -463,9 +511,10 @@ func permanentNotice(line string) (reason string, permanent bool) {
 }
 
 // joinSession runs one connection's lifetime: dial, handshake, relay
-// until the conn dies. It hands its line writer to setSend so stdin
-// forwarding follows the live connection.
-func joinSession(ticket, name, onMsg string, sink *bus.Sink, key ed25519.PrivateKey, setSend func(func(string))) error {
+// until the conn dies. It attaches its conn writer to w so stdin
+// forwarding and task-worker output follow the live connection; the
+// rider (nil for driver joins) outlives the session — see runJoin.
+func joinSession(ticket, name string, sink *bus.Sink, key ed25519.PrivateKey, rider *task.Rider, w *reconnectWriter) error {
 	conn, err := dial(ticket)
 	if err != nil {
 		return err
@@ -482,32 +531,16 @@ func joinSession(ticket, name, onMsg string, sink *bus.Sink, key ed25519.Private
 		fmt.Fprintf(conn, "%s\n", line)
 	}
 
-	// A join with a wake command is a rider: A2A task requests are
-	// claimed here and run through the task lifecycle instead of the
-	// plain sink, with stdout as the result. Joins without --on-msg
-	// (humans on --inbox) leave task traffic to the sink, visible as
-	// ordinary lines.
-	var rider *task.Rider
-	if onMsg != "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return err
-		}
-		dir := filepath.Join(home, ".agentbus", "rider-"+name, "tasks")
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return err
-		}
-		rider = &task.Rider{Dir: dir, Runner: execRunner(onMsg), Send: sendLine,
-			// ACK a task envelope only once its SUBMITTED snapshot is
-			// on disk — the hub then forgets its spooled copy.
-			Acked: func(id string) { sendLine(bus.Ack(id)) }}
-	}
-
 	sc := bufio.NewScanner(conn)
 	// The hub accepts lines up to 256KB; the default 64KB token limit
 	// would fail a legitimate large task line (PR #20 review). Must be
 	// set before the scanner's first Scan.
 	sc.Buffer(make([]byte, 0, 64*1024), 256*1024)
+	// A host that dies silently right after the dial would park
+	// ClientHello on a read forever — exactly the failure the reconnect
+	// loop exists for, so the handshake reads get a deadline too
+	// (PR #48 review). Cleared or re-armed in the loop below.
+	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	if err := bus.ClientHello(conn, sc, name, false, key); err != nil {
 		return err
 	}
@@ -529,10 +562,14 @@ func joinSession(ticket, name, onMsg string, sink *bus.Sink, key ed25519.Private
 			}
 		}
 	}()
-	// Stdin forwarding attaches only AFTER the handshake: a buffered
+	// The shared writer attaches only AFTER the handshake: a buffered
 	// stdin line sent between HELLO and SIG would be read as handshake
 	// traffic and get the connection refused (PR #20 review, P1).
-	setSend(sendLine)
+	// Attaching also flushes task output queued during the disconnect.
+	w.Attach(sendLine)
+	// Probe immediately: the first PONG proves this host answers
+	// heartbeats, which arms the liveness deadline below.
+	sendLine(bus.Ping())
 	// Blob transfers (issue #2) reassemble into a content-addressed
 	// spool; the agent gets one FILE notice per file, never the bytes.
 	var blobs *bus.BlobReceiver
@@ -556,13 +593,25 @@ func joinSession(ticket, name, onMsg string, sink *bus.Sink, key ed25519.Private
 	// A host that died without a FIN (process killed, machine gone)
 	// leaves the read blocked forever — the deadline turns that silence
 	// into a session end, and the reconnect loop takes it from there.
+	// The deadline arms only once the FIRST PONG proves this host
+	// answers heartbeats: against an older no-PONG host an unconditional
+	// deadline would bounce a healthy idle rider every cycle
+	// (PR #48 review). Old hosts keep the old block-forever behavior.
 	liveness := 3 * heartbeatEvery
-	conn.SetReadDeadline(time.Now().Add(liveness))
+	armed := false
 	for sc.Scan() {
-		conn.SetReadDeadline(time.Now().Add(liveness))
 		line := sc.Text()
 		if bus.IsPong(line) {
+			armed = true
+			conn.SetReadDeadline(time.Now().Add(liveness))
 			continue // heartbeat reply: liveness bookkeeping only
+		}
+		if armed {
+			conn.SetReadDeadline(time.Now().Add(liveness))
+		} else {
+			// Handshake deadline done its job (the welcome arrived);
+			// no liveness contract with this host yet.
+			conn.SetReadDeadline(time.Time{})
 		}
 		if bus.IsNotice(line) {
 			fmt.Println(line) // visible to humans, never delivered to agents
