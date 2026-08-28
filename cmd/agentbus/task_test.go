@@ -232,7 +232,12 @@ func TestHostRiderStoresAddressedBlob(t *testing.T) {
 	})
 }
 
-func TestHostSinkWithholdsAckWhenBlobNoticeRejected(t *testing.T) {
+// Per-frame ACK contract: durably written frames ACK immediately (the
+// old hold-until-complete policy deadlocked against pump pacing), but
+// the FINAL frame's ACK is withheld while the FILE notice is refused —
+// its redelivery is the retry vehicle that keeps the published bytes
+// discoverable. No success receipt goes out either.
+func TestHostSinkWithholdsFinalAckWhenBlobNoticeRejected(t *testing.T) {
 	blobs := bus.NewBlobReceiver(t.TempDir(), 0, func(string) {})
 	blobs.Notify = func(string) bool { return false }
 	receipts := make(chan string, 1)
@@ -242,18 +247,43 @@ func TestHostSinkWithholdsAckWhenBlobNoticeRejected(t *testing.T) {
 		acked = append(acked, id)
 	}, bus.NewDedup(64), blobs)
 
-	for i, frame := range bus.BlobFrames("rejected-note", "artifact.bin", []byte("data"), 4) {
+	frames := bus.BlobFrames("rejected-note", "artifact.bin", []byte("data"), 4)
+	for i, frame := range frames {
 		if !route(bus.Message("alice", bus.Envelope(fmt.Sprintf("env-%d", i), frame))) {
 			t.Fatalf("host rejected frame %d before notice delivery", i)
 		}
 	}
-	if len(acked) != 0 {
-		t.Fatalf("acked %d envelopes after FILE notice refusal", len(acked))
+	finalEnv := fmt.Sprintf("env-%d", len(frames)-1)
+	for _, id := range acked {
+		if id == finalEnv {
+			t.Fatalf("final frame %s acked while the FILE notice is refused", finalEnv)
+		}
 	}
 	select {
 	case receipt := <-receipts:
 		t.Fatalf("sent success receipt after FILE notice refusal: %q", receipt)
 	default:
+	}
+
+	// Once the agent accepts the notice, the redelivered final frame
+	// completes the transfer: final ACK plus the success receipt.
+	blobs.Notify = func(string) bool { return true }
+	if !route(bus.Message("alice", bus.Envelope(finalEnv, frames[len(frames)-1]))) {
+		t.Fatal("redelivered final frame refused after notice acceptance")
+	}
+	found := false
+	for _, id := range acked {
+		if id == finalEnv {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("final frame not acked after the notice was accepted")
+	}
+	select {
+	case <-receipts:
+	default:
+		t.Fatal("no success receipt after completion")
 	}
 }
 

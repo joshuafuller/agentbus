@@ -17,8 +17,11 @@ import (
 )
 
 // putChunkBytes is the raw file bytes per BLOB chunk. base64 inflates
-// ~4/3, so this stays well under the hub's 256KB line cap.
-const putChunkBytes = 128 << 10
+// ~4/3, so this stays well under the hub's 256KB line cap. Dropped
+// from 128KB after the WAN test: a ~171KB line monopolizes a slow DERP
+// relay for tens of seconds per write — ~43KB lines drain within the
+// hub's write allowance and let chat interleave between chunks.
+const putChunkBytes = 32 << 10
 
 // runPut streams one file to a named rider, out of band: the bytes
 // travel as BLOB frames the receiver spools content-addressed, and the
@@ -111,7 +114,7 @@ func runPutConn(conn net.Conn, name, rider, path string, timeout time.Duration, 
 		fmt.Fprintf(out, "could not read %s: %v\n", path, err)
 		return 2
 	}
-	hdr := bus.BlobHeader{ID: id, Name: base, Size: info.Size(), Total: total, Sum: sum}
+	hdr := bus.BlobHeader{ID: id, Name: base, Size: info.Size(), Total: total, Sum: sum, Chunk: putChunkBytes}
 	if _, err := fmt.Fprintf(conn, "%s\n", bus.Addressed(rider, hdr.Encode())); err != nil {
 		fmt.Fprintf(out, "send failed: %v\n", err)
 		return 2

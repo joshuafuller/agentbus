@@ -550,7 +550,8 @@ func joinSession(ticket, name string, sink *bus.Sink, key ed25519.PrivateKey, ri
 	}
 	sendLine := func(line string) { sendLineErr(line) }
 
-	sc := bufio.NewScanner(conn)
+	lr := &livenessReader{conn: conn}
+	sc := bufio.NewScanner(lr)
 	// The hub accepts lines up to 256KB; the default 64KB token limit
 	// would fail a legitimate large task line (PR #20 review). Must be
 	// set before the scanner's first Scan.
@@ -606,7 +607,6 @@ func joinSession(ticket, name string, sink *bus.Sink, key ed25519.PrivateKey, ri
 	// At-least-once delivery: the hub redelivers unACKed envelopes, so
 	// remember recent ids and re-ACK duplicates without reprocessing.
 	seen := bus.NewDedup(1024)
-	blobEnvelopes := map[string]map[string]struct{}{}
 	// Host liveness (#34): every heartbeat is answered with a PONG, so
 	// a healthy connection is never quiet for a full heartbeat interval.
 	// A host that died without a FIN (process killed, machine gone)
@@ -616,18 +616,19 @@ func joinSession(ticket, name string, sink *bus.Sink, key ed25519.PrivateKey, ri
 	// answers heartbeats: against an older no-PONG host an unconditional
 	// deadline would bounce a healthy idle rider every cycle
 	// (PR #48 review). Old hosts keep the old block-forever behavior.
+	// Liveness means BYTES are flowing, not lines completing: the
+	// livenessReader refreshes the deadline on every arriving byte, so
+	// a 174KB blob-chunk line trickling over a slow DERP path cannot
+	// expire the deadline mid-line (found in the WAN test: the worker
+	// died and reconnected in a loop, and the transfer never finished).
 	liveness := 3 * heartbeatEvery
-	armed := false
 	for sc.Scan() {
 		line := sc.Text()
 		if bus.IsPong(line) {
-			armed = true
-			conn.SetReadDeadline(time.Now().Add(liveness))
-			continue // heartbeat reply: liveness bookkeeping only
+			lr.arm(liveness) // this host answers heartbeats: liveness on
+			continue
 		}
-		if armed {
-			conn.SetReadDeadline(time.Now().Add(liveness))
-		} else {
+		if !lr.armed() {
 			// Handshake deadline done its job (the welcome arrived);
 			// no liveness contract with this host yet.
 			conn.SetReadDeadline(time.Time{})
@@ -666,33 +667,24 @@ func joinSession(ticket, name string, sink *bus.Sink, key ed25519.PrivateKey, ri
 					continue
 				}
 				// A blob frame is spooled out of band, not delivered to
-				// the agent. Hold every frame ACK until the receiver has
-				// durably published the complete blob.
+				// the agent. Each frame is ACKed as soon as it is
+				// DURABLY written (fsync'd partial) — holding every ACK
+				// until the whole blob completed deadlocked against the
+				// pump's unACKed-byte pacing: header+chunk1 in flight
+				// filled the budget and chunk2 could never fly. Frames
+				// the receiver cannot use yet (chunk before its header,
+				// a refused notification) stay unACKed for redelivery.
 				if blobs != nil {
-					if consumed, ok := blobs.Offer(from, payload); consumed {
-						if blobID := blobFrameID(payload); blobID != "" {
-							pending := blobEnvelopes[blobID]
-							if pending == nil {
-								pending = map[string]struct{}{}
-								blobEnvelopes[blobID] = pending
-							}
-							pending[id] = struct{}{}
-							if ok && blobs.TakeCompleted(blobID) {
-								for envelopeID := range pending {
-									seen.Seen(envelopeID)
-									sendLine(bus.Ack(envelopeID))
-								}
-								delete(blobEnvelopes, blobID)
-							} else if blobs.TakeDuplicate(blobID) {
-								seen.Seen(id)
-								sendLine(bus.Ack(id))
-							} else if blobs.TakeRejected(blobID) {
-								for envelopeID := range pending {
-									seen.Seen(envelopeID)
-									sendLine(bus.Ack(envelopeID))
-								}
-								delete(blobEnvelopes, blobID)
-							}
+					if consumed, accepted := blobs.Offer(from, payload); consumed {
+						blobID := blobFrameID(payload)
+						switch {
+						case accepted:
+							seen.Seen(id)
+							sendLine(bus.Ack(id))
+							blobs.TakeCompleted(blobID) // bookkeeping only
+						case blobs.TakeDuplicate(blobID), blobs.TakeRejected(blobID):
+							seen.Seen(id)
+							sendLine(bus.Ack(id))
 						}
 						continue
 					}

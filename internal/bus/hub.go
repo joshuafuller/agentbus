@@ -110,6 +110,16 @@ func enqueue(conn net.Conn, p peer, line string) {
 	}
 }
 
+// writeAllowance is how long one line may take to drain to a peer: a
+// 5s base plus 1s per 8KB of line. A FLAT 5s killed large frames on
+// slow paths — the WAN test's hub cut a worker off mid-171KB-blob-
+// chunk over a throttled DERP relay, redelivery hit the same wall,
+// and the transfer disconnect-looped forever. Slow-but-moving must
+// stay alive; only genuinely stalled peers should die.
+func writeAllowance(n int) time.Duration {
+	return 5*time.Second + time.Duration(n)*time.Second/(8<<10)
+}
+
 // writePeer is a peer's single writer: it drains the outbox in order.
 // On a write error it closes the conn (unblocking the peer's Serve,
 // which unregisters it and closes the outbox) and discards the rest.
@@ -120,7 +130,7 @@ func writePeer(conn net.Conn, out <-chan string) {
 		if broken {
 			continue
 		}
-		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		conn.SetWriteDeadline(time.Now().Add(writeAllowance(len(line))))
 		if _, err := fmt.Fprintf(conn, "%s\n", line); err != nil {
 			broken = true
 			conn.Close()
@@ -386,21 +396,38 @@ func (h *Hub) unregister(conn net.Conn, name string, oneshot bool, out chan stri
 // lock: FileSpool operations are safe concurrently, and only this
 // goroutine removes for this name. Between passes it sleeps until kicked by a new
 // Add, an ACK, or the retry half-interval.
+// pumpByteBudget caps the UNACKED bytes a pump may have in flight to
+// one peer. Without it the pump floods every pending entry into the
+// outbox at once — the WAN test showed a ~300KB burst of blob chunks
+// wedging the tunnel to a remote rider outright (single 48KB lines
+// survived; a 258KB back-to-back burst never arrived), and redelivery
+// of the spooled backlog re-wedged it forever. ACK-paced flow keeps
+// the pipe under the burst threshold and lets chat interleave.
+const pumpByteBudget = 64 << 10
+
 func (h *Hub) pump(conn net.Conn, me peer, name string) {
 	inflight := map[string]time.Time{}
+	inflightSize := map[string]int{}
+	var inflightBytes int
 	retry := h.RetryInterval
 	if retry <= 0 {
 		retry = 5 * time.Second
 	}
+	ackOne := func(id string) {
+		if err := h.Spool.Remove(name, id); err != nil && !os.IsNotExist(err) {
+			h.notice(fmt.Sprintf("could not clear acked entry %s for %s: %v", id, name, err), nil)
+		}
+		delete(inflight, id)
+		inflightBytes -= inflightSize[id]
+		delete(inflightSize, id)
+	}
 	for {
-		// Absorb pending ACKs first: forget the entry durably.
+		// Absorb pending ACKs first: forget the entry durably and free
+		// its slice of the in-flight byte budget.
 		for {
 			select {
 			case id := <-me.acks:
-				if err := h.Spool.Remove(name, id); err != nil && !os.IsNotExist(err) {
-					h.notice(fmt.Sprintf("could not clear acked entry %s for %s: %v", id, name, err), nil)
-				}
-				delete(inflight, id)
+				ackOne(id)
 				continue
 			default:
 			}
@@ -427,11 +454,23 @@ func (h *Hub) pump(conn net.Conn, me peer, name string) {
 				// and its inflight record with it.
 				h.Spool.Remove(name, id)
 				delete(inflight, id)
+				inflightBytes -= inflightSize[id]
+				delete(inflightSize, id)
 				return true
+			}
+			// Byte-paced flow: hold back once the unACKed bytes in
+			// flight reach the budget (a retry of an already-counted
+			// entry passes; at least one entry always may fly).
+			if _, counted := inflightSize[id]; !counted && inflightBytes > 0 && inflightBytes+len(line) > pumpByteBudget {
+				return false
 			}
 			select {
 			case me.out <- Message(from, Envelope(id, payload)):
 				inflight[id] = now.Add(retry)
+				if _, counted := inflightSize[id]; !counted {
+					inflightSize[id] = len(line)
+					inflightBytes += len(line)
+				}
 				sent++
 				return true
 			default:
@@ -446,10 +485,7 @@ func (h *Hub) pump(conn net.Conn, me peer, name string) {
 		select {
 		case <-me.kick:
 		case id := <-me.acks:
-			if err := h.Spool.Remove(name, id); err != nil && !os.IsNotExist(err) {
-				h.notice(fmt.Sprintf("could not clear acked entry %s for %s: %v", id, name, err), nil)
-			}
-			delete(inflight, id)
+			ackOne(id)
 		case <-time.After(retry / 2):
 		}
 	}
