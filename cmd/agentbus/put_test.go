@@ -272,7 +272,7 @@ func TestOfferUnwrappedBlobFrame(t *testing.T) {
 		}
 	}
 	sum := sha256.Sum256([]byte("data"))
-	if _, err := os.Stat(filepath.Join(dir, hex.EncodeToString(sum[:])[:8]+"-f.bin")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, hex.EncodeToString(sum[:])+"-f.bin")); err != nil {
 		t.Fatalf("unwrapped blob was not published: %v", err)
 	}
 }

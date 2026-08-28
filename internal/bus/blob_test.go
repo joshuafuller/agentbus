@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,7 +96,7 @@ func TestBlobReceiverWritesContentAddressedFileAndNotifiesOnce(t *testing.T) {
 	}
 
 	hash := hex.EncodeToString(sum[:])
-	want := filepath.Join(dir, hash[:8]+"-report.bin")
+	want := filepath.Join(dir, hash+"-report.bin")
 	got, err := os.ReadFile(want)
 	if err != nil {
 		t.Fatalf("blob file not written: %v", err)
@@ -107,9 +108,45 @@ func TestBlobReceiverWritesContentAddressedFileAndNotifiesOnce(t *testing.T) {
 		t.Fatalf("want exactly one notification, got %d: %v", len(notes), notes)
 	}
 	n := notes[0]
-	for _, part := range []string{"FILE", hash[:8], "report.bin", want} {
+	for _, part := range []string{"FILE", hash, "report.bin", want} {
 		if !strings.Contains(n, part) {
 			t.Fatalf("notification %q missing %q", n, part)
+		}
+	}
+}
+
+func TestBlobReceiverKeepsFullDigestPathsDistinct(t *testing.T) {
+	type candidate struct {
+		payload []byte
+		digest  string
+	}
+	first := candidate{
+		payload: []byte("collision-candidate-758"),
+		digest:  "58bc101607d656d7d4a68734ca62a287d9cf67d8c328d3cdef6bf939fa9811e0",
+	}
+	second := candidate{
+		payload: []byte("collision-candidate-110114"),
+		digest:  "58bc1016f193e7adc22f52e1072782877f8bc0a8fa36ba606e34ba5b42a4b7c6",
+	}
+
+	dir := t.TempDir()
+	r := NewBlobReceiver(dir, 0, func(string) {})
+	for i, c := range []candidate{first, second} {
+		id := fmt.Sprintf("collision-%d", i)
+		for _, frame := range BlobFrames(id, "same.bin", c.payload, len(c.payload)) {
+			if consumed, ok := r.Offer("sender", frame); !consumed || !ok {
+				t.Fatalf("receiver refused collision candidate %d", i)
+			}
+		}
+	}
+	for _, c := range []candidate{first, second} {
+		path := filepath.Join(dir, c.digest+"-same.bin")
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("full-digest blob path %s missing: %v", path, err)
+		}
+		if !bytes.Equal(got, c.payload) {
+			t.Fatalf("blob at %s was overwritten", path)
 		}
 	}
 }
@@ -201,7 +238,7 @@ func TestBlobReceiverCleansUpPublishFailure(t *testing.T) {
 	r.Reply = func(_, line string) { receipts = append(receipts, line) }
 	payload := []byte("data")
 	sum := sha256.Sum256(payload)
-	final := filepath.Join(dir, hex.EncodeToString(sum[:])[:8]+"-f.bin")
+	final := filepath.Join(dir, hex.EncodeToString(sum[:])+"-f.bin")
 	if err := os.Mkdir(final, 0o700); err != nil {
 		t.Fatal(err)
 	}

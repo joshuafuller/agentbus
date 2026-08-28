@@ -340,7 +340,7 @@ func (r *BlobReceiver) finish(x *blobXfer) bool {
 	if err := x.file.Close(); err != nil {
 		return r.abort(x, err.Error())
 	}
-	final := filepath.Join(r.dir, got[:8]+"-"+x.hdr.Name)
+	final := filepath.Join(r.dir, got+"-"+x.hdr.Name)
 	if err := os.Rename(filepath.Join(r.dir, ".partial", x.hdr.ID), final); err != nil {
 		x.refused = true
 		r.rejected[x.hdr.ID] = struct{}{}
@@ -350,7 +350,7 @@ func (r *BlobReceiver) finish(x *blobXfer) bool {
 		r.receipt(x, false, "publish-error")
 		return false
 	}
-	line := fmt.Sprintf("[%s] FILE %s %s %dB → %s", x.from, got[:8], x.hdr.Name, x.got, final)
+	line := fmt.Sprintf("[%s] FILE %s %s %dB → %s", x.from, got, x.hdr.Name, x.got, final)
 	delete(r.open, x.hdr.ID)
 	if r.Notify != nil {
 		if !r.Notify(line) {
