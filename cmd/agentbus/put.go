@@ -83,7 +83,11 @@ func runPutConn(conn net.Conn, name, rider, path string, timeout time.Duration, 
 		fmt.Fprintf(out, "identity handshake failed: %v\n", err)
 		return 2
 	}
-	if !sc.Scan() || !strings.Contains(sc.Text(), "welcome aboard") {
+	if !sc.Scan() {
+		fmt.Fprintln(out, "connection closed before welcome from bus")
+		return 2
+	}
+	if !strings.Contains(sc.Text(), "welcome aboard") {
 		fmt.Fprintf(out, "bus refused this connection: %s\n", sc.Text())
 		return 2
 	}

@@ -167,6 +167,30 @@ func TestPutUsesConfiguredTimeout(t *testing.T) {
 	}
 }
 
+func TestPutReportsClosedConnectionBeforeWelcome(t *testing.T) {
+	client, peer := net.Pipe()
+	t.Cleanup(func() {
+		client.Close()
+		peer.Close()
+	})
+	go func() {
+		reader := bufio.NewReader(peer)
+		reader.ReadString('\n')
+		peer.Close()
+	}()
+	src := filepath.Join(t.TempDir(), "payload.bin")
+	if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if code := runPutConn(client, "alice", "bob", src, time.Second, nil, &out); code != 2 {
+		t.Fatalf("closed connection returned %d: %q", code, out.String())
+	}
+	if !strings.Contains(out.String(), "connection closed before welcome") {
+		t.Fatalf("closed connection message = %q", out.String())
+	}
+}
+
 func TestPutRefusesMissingFileAndBadRider(t *testing.T) {
 	h := bus.NewHub("host", nil)
 	var out strings.Builder
