@@ -11,6 +11,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"flag"
 	"fmt"
 	"io"
@@ -56,6 +57,9 @@ Usage:
 
 Flags:
   --name <name>     participant name (default: hostname)
+  --to <rider>      (send) address the message to one rider only; the
+                    host spools it durably if that rider is absent
+                    and redelivers on rejoin (24h TTL)
   --inbox <file>    append received messages to this file
   --on-msg <cmd>    run this shell command per received message;
                     the message is in $AGENTBUS_MSG, $AGENTBUS_FROM, $AGENTBUS_TEXT
@@ -101,9 +105,14 @@ func main() {
 		err = runJoin(ticket, *name, *onMsg, sinkFor(*inbox, *onMsg))
 	case "send":
 		ticket, rest := popTicket(args)
+		to := fs.String("to", "", "address the message to one rider (spooled if absent) instead of broadcasting")
 		fs.Parse(rest)
 		validateName()
-		err = runSend(ticket, *name, strings.Join(fs.Args(), " "))
+		if *to != "" && !bus.ValidName(*to) {
+			fmt.Fprintf(os.Stderr, "agentbus: invalid --to %q: letters, digits, dash, underscore, dot (max 64)\n", *to)
+			os.Exit(2)
+		}
+		err = runSend(ticket, *name, *to, strings.Join(fs.Args(), " "))
 	case "version":
 		fs.Parse(args)
 		printVersion(os.Stdout)
@@ -559,7 +568,7 @@ func offerUnwrappedBlob(blobs *bus.BlobReceiver, from, payload string) bool {
 	return true
 }
 
-func runSend(ticket, name, msg string) error {
+func runSend(ticket, name, to, msg string) error {
 	if msg == "" {
 		b, _ := io.ReadAll(os.Stdin)
 		msg = strings.TrimSpace(string(b))
@@ -571,18 +580,30 @@ func runSend(ticket, name, msg string) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
 	// Authenticate when we hold this name's key (an operator sending
 	// under their rider's name on the same host); a bound name refuses
 	// unkeyed sends outright (issue #6).
 	rdir, err := riderDir(name)
 	if err != nil {
+		conn.Close()
 		return err
 	}
 	key, err := bus.LoadKeyIfExists(rdir)
 	if err != nil {
+		conn.Close()
 		return err
 	}
+	return runSendConn(conn, name, to, msg, key)
+}
+
+// runSendConn is the transport-independent body of runSend, split out
+// so tests can drive it over an in-memory hub. With a non-empty `to`,
+// every line goes out addressed (TO <rider> ...): the hub delivers it
+// to that rider alone, spooling it durably when the rider is absent
+// (issue #33) — the coordination path the broadcast default cannot
+// give. It closes conn itself.
+func runSendConn(conn net.Conn, name, to, msg string, key ed25519.PrivateKey) error {
+	defer conn.Close()
 	sc := bufio.NewScanner(conn)
 	if err := bus.ClientHello(conn, sc, name, true, key); err != nil {
 		return err
@@ -597,6 +618,9 @@ func runSend(ticket, name, msg string) error {
 	}
 	for _, line := range strings.Split(msg, "\n") {
 		if line = strings.TrimSpace(line); line != "" {
+			if to != "" {
+				line = bus.Addressed(to, line)
+			}
 			fmt.Fprintf(conn, "%s\n", line)
 		}
 	}
