@@ -139,7 +139,7 @@ func FuzzParseChallenge(f *testing.F) {
 		f.Fatalf("ParseChallenge(%q) = %q, ok=%v", valid, nonce, ok)
 	}
 	f.Fuzz(func(t *testing.T, line string) {
-		ParseChallenge(line)
+		_, _ = ParseChallenge(line)
 	})
 }
 
