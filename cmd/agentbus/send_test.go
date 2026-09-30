@@ -188,7 +188,7 @@ func TestSendToReportsSpoolFailure(t *testing.T) {
 // before any network use. Re-execs the test binary so os.Exit is real.
 func TestSendToInvalidRiderNameExits2(t *testing.T) {
 	if os.Getenv("AGENTBUS_RUN_MAIN") == "1" {
-		os.Args = []string{"agentbus", "send", "tc-unused-ticket", "--to", "bad name!", "hi"}
+		os.Args = []string{"agentbus", "send", "ab1-unused-ticket", "--to", "bad name!", "hi"}
 		main()
 		return
 	}

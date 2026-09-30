@@ -114,3 +114,17 @@ func TestCodexCommandsSkipGitRepoCheck(t *testing.T) {
 		t.Errorf("bootstrap lacks model args: %v", args)
 	}
 }
+
+func TestCodexWireNetworkBoundary(t *testing.T) {
+	args := codexBootArgs(codexBriefing("rider"), "")
+	cmd := codexOnMsg("/a path's/rider", "01a0-abcd", "", codexReplyOptions("/a path/agentbus", "/private/reply.json")...)
+	if !slices.Contains(args, "sandbox_workspace_write.network_access=false") || !strings.Contains(cmd, "sandbox_workspace_write.network_access=false") {
+		t.Fatal("command network not disabled")
+	}
+	if !strings.Contains(cmd, "mcp_servers.agentbus.command=") || !strings.Contains(cmd, "reply-tool") {
+		t.Fatal("reply tool not configured on resume")
+	}
+	if strings.Contains(codexBriefing("rider"), "agentbus send") {
+		t.Fatal("Codex must use reply tool")
+	}
+}

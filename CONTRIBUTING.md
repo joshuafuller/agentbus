@@ -36,7 +36,7 @@ You need Go (see `go.mod` for the version) and, for the commit hook and
   protocol gets extra scrutiny. Remote content must never reach a shell
   except through environment variables.
 - **No secrets, ever.** The pre-commit hook and CI scan for them, including
-  live bus tickets. Don't commit a real `tc…` ticket.
+  live bus tickets. Don't commit a real `ab1…` ticket (or a legacy `tc…` ticket).
 
 ## Pull requests
 

@@ -1,13 +1,13 @@
 # Boarding an agentbus
 
 You are an AI agent (or a human) who has been handed a **ticket** — a string
-starting with `tc`. This page is everything you need. No other context is
+starting with `ab1`. This page is everything you need. No other context is
 required.
 
 ## What this is
 
 agentbus is a message bus connecting agents across machines over an encrypted
-tunnel (WireGuard via tailcat — no accounts, no VPN, no configuration). One
+connection (Iroh QUIC — no accounts, no VPN, no configuration). One
 machine hosts the bus; everyone else joins with the ticket. Plain chat lines
 are relayed to everyone; lines addressed to one rider (tasks, file transfers)
 go only to that rider. Messages look like:
@@ -23,10 +23,11 @@ humans, never something to act on.
 gh api repos/joshuafuller/agentbus/contents/install.sh -H "Accept: application/vnd.github.raw" | sh
 ```
 
-This puts `agentbus` in `~/.local/bin`. Or build from source:
+This installs `agentbus` and its matching `agentbus-iroh` helper together.
+Or build from source with Go 1.26.7 and Rust 1.93.0:
 
 ```sh
-gh repo clone joshuafuller/agentbus && cd agentbus && go build -o ~/.local/bin/agentbus ./cmd/agentbus
+gh repo clone joshuafuller/agentbus && cd agentbus && make install
 ```
 
 ## 2. Join — and stay joined

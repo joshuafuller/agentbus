@@ -19,7 +19,7 @@ flowchart TB
         T["a ticket — one pasteable string<br/>(the only thing a human relays)"]
     end
     subgraph L2["② Connection bootstrap"]
-        TC["tailcat: resolve ticket → authenticated<br/>WireGuard tunnel (NAT punch, DERP relay)"]
+        TC["Iroh: authenticate endpoint → check admission<br/>QUIC stream (NAT traversal, relay fallback)"]
     end
     subgraph L3["③ Runtime ingress"]
         HUB["hub relays lines"] --> SINK["sink delivers to the<br/>runtime's activation mechanism"]
@@ -53,7 +53,7 @@ flowchart LR
         SINK["sink.go<br/>Sink: inbox / --on-msg delivery"]
         AWAIT["await.go<br/>Await: inbox tail + read offset"]
     end
-    TC["tailcat<br/>(vendored transport)"]
+    TC["transport.go<br/>official Rust Iroh bridge"]
 
     MAIN --> HUB & SINK & AWAIT & PROTO
     WIRE --> MAIN
@@ -79,6 +79,18 @@ flowchart LR
 - **`proto`** is the wire vocabulary and the `ValidName` gate that keeps
   names safe for shells and paths.
 
+## Transport boundary
+
+`transport.go` replaces the former Tailcat bootstrap with Iroh QUIC through
+the `agentbus-iroh` helper, pinned to official Rust Iroh 1.3.0.
+Private Unix sockets connect the Go bus to the Rust QUIC streams. It authenticates the host endpoint and checks a
+separate ticket admission secret before the existing hub handshake. The
+hub, spool, tasks and activation paths retain their `net.Conn` interface.
+The host persists its endpoint identity, admission secret and selected relay,
+so tickets survive changing local addresses and process restarts.
+See [ADR 0006](adr/0006-official-rust-iroh.md) for the implementation tradeoff
+and [PROTOCOL.md](PROTOCOL.md#ticket-and-admission-v1) for framing.
+
 ## Message lifecycle
 
 What actually happens when Alice assigns work to Bob's idle agent:
@@ -87,7 +99,7 @@ What actually happens when Alice assigns work to Bob's idle agent:
 sequenceDiagram
     autonumber
     participant A as alice (send)
-    participant HT as host: tailcat
+    participant HT as host: Iroh
     participant H as host: Hub
     participant BT as bob: join process
     participant S as bob: Sink
@@ -164,14 +176,15 @@ flowchart TB
     B["bob-claude<br/>(wired agent)"]
     C["carol-codex<br/>(wired agent)"]
     D["dave<br/>(human in a terminal)"]
-    HOST <-->|WireGuard tunnel| B
-    HOST <-->|WireGuard tunnel| C
-    HOST <-->|WireGuard tunnel| D
+    HOST <-->|Iroh QUIC stream| B
+    HOST <-->|Iroh QUIC stream| C
+    HOST <-->|Iroh QUIC stream| D
 ```
 
-**Consequence of the star:** if the host dies, the bus is gone and riders
-rejoin a new ticket. That is an accepted trade for v0 — no consensus, no
-split-brain, one place to look. Presence is honest: riders visibly hop on
+**Consequence of the star:** the bus is unavailable while the host is down.
+Restarting with the saved identity resumes the same ticket and trust table;
+riders reconnect and addressed work waits in the durable spool. There is
+no failover host or consensus. Presence is honest: riders visibly hop on
 and off.
 
 ## Deliberate non-goals (for now)
@@ -181,7 +194,7 @@ held until real usage demands it:
 
 | Deferred | Why held | Where it would go |
 |----------|----------|-------------------|
-| Per-rider revocation | Admission machinery | tailcat `AllowedClients` |
+| Per-rider revocation | Admission machinery | host admission policy |
 | Short-code (voice-relayable) admission | Needs a rendezvous/PAKE layer | in front of ticket resolution |
 | Sender authentication | Identity is its own subsystem | signed names / MLS |
 | Multiparty group crypto | Two-party transport works first | above the transport |

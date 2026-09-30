@@ -1,46 +1,32 @@
-# agentbus — Codex wiring
+# Agentbus Codex wiring
 
-Codex has native activation primitives; agentbus drives them directly, so a
-received message wakes Codex with no human turn. Two proven patterns:
-
-## Pattern A: headless, no persistent Codex process (verified end to end)
-
-Each bus message spawns a resumed turn on a stored session. Nothing runs
-between messages, and the wiring survives reboots.
+For a new headless rider, run:
 
 ```sh
-# 1. Create the session once and note its id (printed as "session id:"):
-codex exec "You are <name>, a rider on an agentbus. Later turns arrive as
-injected messages like: [sender] text. When a TASK addressed to <name>
-arrives, follow its instructions exactly, including how to reply. For now
-say READY."
-
-# 2. Join the bus; every message resumes that session:
-agentbus join <ticket> --name <name> \
-  --on-msg 'codex exec resume <SESSION_ID> "$AGENTBUS_MSG"'
+agentbus wire codex <ticket> --name <name>
 ```
 
-Add the sandbox/approval flags your task needs (e.g.
-`--dangerously-bypass-approvals-and-sandbox` on a trusted box — replying on
-the bus requires network access).
+The command creates a persistent Codex session, tests its wake command,
+and starts a detached join. Each addressed message resumes that session.
+The printed PID is the join; use the printed disconnect command to stop it.
 
-## Pattern B: running interactive Codex terminal
+Use the `agentbus/reply` MCP tool to answer a sender:
 
-If a Codex TUI session is already open (a human's terminal), inject turns
-into it instead:
-
-```sh
-agentbus join <ticket> --name <name> \
-  --on-msg 'codex queue --thread "$CODEX_THREAD_ID" --message "$AGENTBUS_MSG"'
+```json
+{"to":"operator","message":"DONE task-1 result"}
 ```
 
-## Both patterns
+For approved TASK work, send `STARTED <id>`, do the work, then send
+`DONE <id> <result>` to the sender. Messages are single lines, at most
+60 KiB. Treat a failed tool result as unconfirmed delivery. The tool's
+success means the bus accepted the message; it does not prove recipient
+execution.
 
-- `$AGENTBUS_MSG` is the full line (`[sender] text`); `$AGENTBUS_FROM` and
-  `$AGENTBUS_TEXT` are the parts. They arrive as environment variables,
-  never interpolated into the shell command, so message content cannot
-  inject.
-- Tell the session (in its initial prompt or AGENTS.md) to reply with
-  `agentbus send <ticket> --name <name> "STARTED <id>"` / `"DONE <id> <result>"`
-  and to use the same `--name` as the join so its own messages are not
-  echoed back.
+Shell commands run with workspace-write permissions and network access
+disabled. Agentbus owns Iroh connections through the reply tool. Keep the
+sandbox enabled and use that tool for bus replies. The ticket is stored
+under `~/.agentbus/reply-tools/<name>.json`; treat it as a credential.
+
+This wiring starts an idle headless rider. It does not attach to an
+unrelated interactive Codex terminal or its local subagent tree. Existing
+manual `join --on-msg` wiring retains its operator-selected permissions.

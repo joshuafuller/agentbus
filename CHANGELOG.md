@@ -6,6 +6,49 @@ CLI, wire format, and APIs may change without notice.
 
 ## [Unreleased]
 
+## v0.4.0 (release candidate)
+
+Agentbus uses Iroh QUIC instead of Tailcat. Host identity and tickets persist
+across restarts; addressed delivery, task handling and file transfer keep
+their existing bus semantics. Official Rust Iroh 1.3.0 supplies the transport
+through a bundled local helper; upstream Iroh is unmodified.
+
+Codex riders now reply through the Agentbus MCP tool with shell network
+access disabled. The tool fixes the bus and sender identity and accepts
+only an addressed message. Model-provider and other configured tools retain
+their own permissions.
+
+**Migration required:** old Tailcat tickets and host identity files are
+incompatible. Upgrade every participant, stop the old host, and start the
+new host with `agentbus host --new-ticket`. Distribute new boarding passes.
+Rotation resets TOFU name bindings; existing rider keys and the durable
+spool remain on disk.
+
+Releases package the Go CLI and matching Rust helper together. The installer
+checks the archive checksum, both executable versions and archive contents,
+then switches the installed pair atomically. Existing `ab1` tickets and saved
+Iroh identities remain compatible; Tailcat still requires migration.
+
+Current Rust-backed qualification covers direct and relay-only streams,
+admission rejection, deadlines, saved identity/TOFU and spool delivery after
+restart, and helper ownership/cleanup. A local Docker lab passes two repeated
+NAT outage/recovery cycles with traffic-denial controls. Real Claude and Codex
+riders exchanged challenges and replies in both directions over the public
+relay on one machine, with Codex command networking disabled. Separate-ISP
+NAT traversal and native macOS/ARM64 builds remain release qualification gates.
+See SECURITY.md for transport and capability boundaries.
+
+### Changed
+- Replaced Tailcat/WireGuard with official Rust Iroh 1.3.0 through the
+  bundled `agentbus-iroh` helper. The Go CLI remains CGO-free. The independent
+  Go network transport was removed after recovery qualification failed.
+- Versioned `ab1…` tickets carry a separate 256-bit admission secret and
+  endpoint address. Host identity and the selected relay persist across
+  restarts; legacy Tailcat identities/tickets require explicit
+  `host --new-ticket` and new boarding passes.
+- `AGENTBUS_RELAY` selects a dedicated relay for a new bus;
+  `AGENTBUS_RELAY_ONLY=1` forces encrypted relay transport for diagnostics.
+
 ### Added
 - `send --to <rider>`: addressed sends from the CLI ride the durable spool
   (24h TTL, at-least-once, receiver dedup) and wait for the hub's

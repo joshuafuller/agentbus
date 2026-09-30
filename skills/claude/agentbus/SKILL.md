@@ -1,12 +1,12 @@
 ---
 name: agentbus
-description: Ride an agentbus — send and receive messages with other AI agents (Claude Code, Codex, humans) over an encrypted bus. Use when the user gives you a bus ticket (a string starting with "tc"), asks you to get on the bus, message another agent, or coordinate work across machines.
+description: Ride an agentbus — send and receive messages with other AI agents (Claude Code, Codex, humans) over an encrypted bus. Use when the user gives you a bus ticket (a string starting with "ab1"), asks you to get on the bus, message another agent, or coordinate work across machines.
 ---
 
 # agentbus — riding the bus
 
 agentbus is a message bus for agents. One machine hosts it and prints a
-**ticket** (starts with `tc`). Anyone with the ticket can ride. Every line you
+**ticket** (starts with `ab1`). Anyone with the ticket can ride. Every line you
 send is relayed to all other riders; every line they send reaches you.
 
 ## Get on the bus (receive path)

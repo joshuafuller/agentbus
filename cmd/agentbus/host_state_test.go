@@ -1,24 +1,29 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/joshuafuller/agentbus/internal/bus"
-	"github.com/tailscale/tailcat"
+	"github.com/tmc/go-iroh/key"
+	"github.com/tmc/go-iroh/netaddr"
 )
 
 // The ticket must survive a host restart (#34): the identity saved to
-// the state dir reloads into the exact same ConnBlob, so every issued
+// the state dir reloads into the exact same Iroh ticket, so every issued
 // boarding pass and every rider's saved ticket stays valid across an
 // in-place upgrade.
 func TestHostRestartKeepsTicket(t *testing.T) {
 	dir := t.TempDir()
 
-	pk := tailcat.NewPrivateKey()
-	pk.Public.RegionID = 17
+	pk, err := newHostIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk.Relay = "https://relay.example.invalid/"
 	if err := saveHostIdentity(dir, pk); err != nil {
 		t.Fatal(err)
 	}
@@ -30,12 +35,11 @@ func TestHostRestartKeepsTicket(t *testing.T) {
 	if got == nil {
 		t.Fatal("identity not found after save")
 	}
-	if !got.Private.Equal(pk.Private) {
+	if !bytes.Equal(got.Private, pk.Private) || !bytes.Equal(got.Admission, pk.Admission) {
 		t.Fatal("private key changed across save/load")
 	}
-	if got.Public.ConnBlob() != pk.Public.ConnBlob() {
-		t.Fatalf("ticket changed across restart:\n old %s\n new %s",
-			pk.Public.ConnBlob(), got.Public.ConnBlob())
+	if identityTicket(t, got) != identityTicket(t, pk) {
+		t.Fatal("ticket changed across restart")
 	}
 
 	fi, err := os.Stat(filepath.Join(dir, "identity.json"))
@@ -63,7 +67,12 @@ func TestLoadHostIdentityAbsent(t *testing.T) {
 // clean trust table.
 func TestNewTicketResetsHostState(t *testing.T) {
 	dir := t.TempDir()
-	if err := saveHostIdentity(dir, tailcat.NewPrivateKey()); err != nil {
+	pk, err := newHostIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk.Relay = "https://relay.example.invalid/"
+	if err := saveHostIdentity(dir, pk); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "tofu.json"), []byte("{}"), 0o600); err != nil {
@@ -142,6 +151,34 @@ func TestPermanentNoticeClassification(t *testing.T) {
 	for _, line := range transient {
 		if reason, ok := permanentNotice(line); ok {
 			t.Errorf("notice wrongly classified permanent (%q): %q", reason, line)
+		}
+	}
+}
+
+func identityTicket(t *testing.T, id *hostIdentity) string {
+	t.Helper()
+	sk, err := key.SecretKeyFromSlice(id.Private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := parseRelay(id.Relay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encodeTicket(netaddr.NewEndpointAddr(sk.Public().EndpointID()).WithRelayURL(u), id.Admission)
+}
+
+func TestHostIdentityRejectsLegacyAndCorruptState(t *testing.T) {
+	for _, data := range []string{
+		`{`, `{}`, `{"Private":{},"Public":{}}`,
+		`{"version":2}`, `{"version":1,"private":"AA==","admission":"AA==","relay":"https://relay.example.invalid/"}`,
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, hostIdentityFile), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadHostIdentity(dir); err == nil {
+			t.Fatal("invalid or legacy identity accepted")
 		}
 	}
 }

@@ -11,10 +11,10 @@ being the copy-paste bus.*
 
 ![Status](https://img.shields.io/badge/status-experimental%20·%20walking%20skeleton-orange)
 [![CI](https://github.com/joshuafuller/agentbus/actions/workflows/ci.yml/badge.svg)](https://github.com/joshuafuller/agentbus/actions/workflows/ci.yml)
-![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)
+![Go](https://img.shields.io/badge/Go-1.26.7+-00ADD8?logo=go&logoColor=white)
 ![Release](https://img.shields.io/badge/release-v0.3.1-blue)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-lightgrey)
-![Transport](https://img.shields.io/badge/transport-WireGuard%C2%AE%20via%20tailcat-88171A)
+![Transport](https://img.shields.io/badge/transport-Iroh%20QUIC-88171A)
 ![Model](https://img.shields.io/badge/works%20with-Claude%20Code%20%C2%B7%20Codex-7C3AED)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -51,8 +51,8 @@ but the point is collaboration, made as frictionless as it can be.
 >
 > What that means honestly:
 > - **Not audited.** No professional security review. The crypto is
->   tailcat's (WireGuard); we don't roll our own, but the surrounding design
->   is young.
+>   the official Rust Iroh 1.3.0 implementation supplies TLS 1.3;
+>   the Agentbus integration and surrounding design remain unaudited.
 > - **Barely tested by real-world standards.** Activation and multi-rider
 >   fan-out are verified on one host; WAN traversal, adversarial peers, and
 >   long-running stability are **not** yet.
@@ -74,7 +74,7 @@ but the point is collaboration, made as frictionless as it can be.
 $ agentbus host --name alice
 🚌 the bus is running. your ticket:
 
-  tcomFwWCBjmSSW04e2SZ...
+  ab1abc...
 
 riders join with:      agentbus join <ticket> --name <who>
 onboard a fresh agent: agentbus invite <ticket> --name <who>
@@ -84,14 +84,14 @@ onboard a fresh agent: agentbus invite <ticket> --name <who>
 (over Slack, a call, a sticky note — no enrollment on their end):
 
 ```console
-$ agentbus wire claude tcomFw... --name bob-claude
+$ agentbus wire claude ab1abc... --name bob-claude
 wired: bob-claude is on the bus (runtime claude, pid 51423)
 ```
 
 **③ Anyone on the bus assigns work** — to a teammate's agent or their own:
 
 ```console
-$ agentbus send tcomFw... --name alice "TASK t1 for bob-claude: review the auth diff"
+$ agentbus send ab1abc... --name alice "TASK t1 for bob-claude: review the auth diff"
 ```
 
 Bob's idle agent wakes on Alice's message, replies `STARTED t1`, does the
@@ -139,7 +139,7 @@ agentbus treats **activation as the product**:
 | Rider | Wake mechanism | What happens on receive |
 |---|---|---|
 | **Claude Code** | `claude -p --continue` per message | each message spawns a resumed turn of a briefed rider conversation |
-| **Codex** | `codex exec resume <id>` per message | same pattern, Codex-native |
+| **Codex** | `codex exec resume <id>` per message | shell network disabled; replies use the Agentbus MCP tool |
 | **Interactive Claude session** | `agentbus await` as a background task | task completion wakes the session |
 | **Human** | a terminal running `join` | you read it |
 
@@ -198,14 +198,14 @@ flowchart LR
     subgraph C[machine C]
         J2[agentbus join] -->|codex exec resume| C2[Codex]
     end
-    J1 <-->|WireGuard tunnel| H
-    J2 <-->|WireGuard tunnel| H
+    J1 <-->|Iroh QUIC stream| H
+    J2 <-->|Iroh QUIC stream| H
 ```
 
-- **Transport**: [tailcat](https://github.com/tailscale/tailcat) —
-  Tailscale's data plane without its control plane. WireGuard-encrypted
-  tunnels, NAT hole-punching, DERP relay fallback. Compiled in; no
-  external processes.
+- **Transport**: official [Rust Iroh](https://docs.rs/iroh/1.3.0/iroh/)
+  `1.3.0` supplies QUIC, endpoint authentication, NAT traversal and relay
+  fallback. The bundled `agentbus-iroh` helper connects to the Go CLI through
+  private Unix sockets. Go does not implement the network transport.
 - **Topology**: a star. The host relays every line to every rider and is
   itself a participant.
 - **Protocol**: newline-delimited text. `[sender] text` for messages,
@@ -242,8 +242,8 @@ message content cannot inject).
 > [!WARNING]
 > **The ticket is the key.** Anyone holding it is on the bus and can send
 > tasks to every wired rider. Treat tickets like passwords. There is no
-> per-rider revocation yet — invalidating a ticket means restarting the
-> host (a known limitation, see [SECURITY.md](SECURITY.md)).
+> per-rider revocation yet — invalidating a ticket means running
+> `host --new-ticket` (a known limitation, see [SECURITY.md](SECURITY.md)).
 
 > [!IMPORTANT]
 > A wired rider executes shell commands autonomously — that is the
@@ -251,9 +251,11 @@ message content cannot inject).
 > and runtime sandboxes/permission systems still apply, but you should
 > wire riders only on machines where that trade is acceptable.
 
-- All traffic is end-to-end WireGuard-encrypted; same-host tests verify
-  the tunnel is genuinely used (both endpoints hold DERP relay
-  connections).
+- Participant-to-host streams are TLS 1.3 encrypted, including through a
+  network relay. The bus host can read the messages it routes.
+- A ticket carries a random 256-bit admission secret, checked inside the
+  authenticated stream before hub access; a public endpoint address alone
+  does not admit a participant.
 - Remote message content reaches `--on-msg` commands only via environment
   variables — no shell injection surface.
 - Participant names are validated (`[A-Za-z0-9._-]`, ≤64) at every entry
@@ -269,31 +271,71 @@ about.
 
 ## Honest limits
 
-- **Star topology.** Host dies → bus gone. Riders rejoin a new ticket.
+- **Star topology.** Work waits while the host is down. Restarting the same
+  host state resumes the ticket; riders reconnect automatically.
 - **Offline delivery is host-local and bounded.** Addressed lines spool durably
   for 24 hours and are delivered as envelopes requiring receiver ACKs; unACKed
   envelopes are redelivered, so delivery is at-least-once with receiver-side
   deduplication by envelope ID. Broadcast messages remain ephemeral.
 - **Same-host ≠ WAN proof.** The tunnel is real either way, but if you
   need cross-network guarantees, test across your actual networks.
-- **Pinned dependency.** tailcat makes no API stability promises; agentbus
-  pins it and upgrades deliberately.
+- **Pinned dependency.** The helper uses official Rust Iroh `1.3.0` and a
+  committed Cargo lockfile. Upgrades require transport checks. The Go CLI
+  retains the existing Go ticket codec for `ab1` compatibility; it does not
+  use that implementation's QUIC, sockets or NAT traversal.
+- **Relay availability.** Tickets retain the selected relay across restarts.
+  If it is unavailable, hosting fails visibly; selecting another relay
+  requires `host --new-ticket` and new boarding passes. Public relays are
+  for development/testing; configure your own relay for production.
 
 What you don't get is also what you don't pay for: no queues to
 reconcile, no ledgers to debug. `kill` leaves almost nothing behind —
-the only on-disk state is the host's 24h addressed-line spool and each
-rider's key/inbox under `~/.agentbus/`, both safe to delete.
+state lives under `~/.agentbus/`: host identity and trust bindings, the
+addressed-line spool, and rider keys, inboxes, blobs and task state.
+Deleting the host identity invalidates issued boarding passes.
 
 ## Install
 
-Grab a release binary (linux/macOS, amd64/arm64), or:
+The v0.4.0 candidate uses Iroh. Published v0.3.1 binaries use the
+incompatible Tailcat transport. Until v0.4.0 is published, build this
+candidate on each participant:
 
 ```console
-$ go build -o agentbus ./cmd/agentbus
+$ make build
 ```
 
-Pure Go, static binary, cross-compiles with plain `GOOS`/`GOARCH`.
-`AGENTBUS_DEBUG=1` enables tunnel debug logs.
+After publication, download and review the installer before running it:
+
+```sh
+gh api "repos/joshuafuller/agentbus/contents/install.sh?ref=v0.4.0" -H "Accept: application/vnd.github.raw" > /tmp/agentbus-install.sh
+cat /tmp/agentbus-install.sh
+AGENTBUS_VERSION=v0.4.0 sh /tmp/agentbus-install.sh
+```
+
+The installer selects the platform asset from that exact tag, verifies its
+SHA256SUMS entry, and verifies both executables before atomically switching
+an existing install to the new pair. Its source fallback builds the same tag
+and requires Go and Rust. An unpublished or missing tag fails rather than
+silently installing the older transport.
+
+Build from source with Go 1.26.7 and Rust 1.93.0. Keep `agentbus` and
+`agentbus-iroh` together; releases package both in one platform archive.
+The Go CLI remains CGO-free. The Rust helper needs a native build for each
+Linux/macOS architecture. `AGENTBUS_IROH_BIN` overrides the helper path for
+local development.
+
+### Upgrading from Tailcat
+
+Old `tc…` tickets and host identities are incompatible. Stop the old host,
+then start this version with `agentbus host --new-ticket` and distribute
+new boarding passes. The durable spool and rider keys remain in place;
+ticket rotation resets the host's TOFU bindings.
+
+`AGENTBUS_RELAY=https://your-relay.example/ agentbus host --new-ticket`
+selects a dedicated relay. The relay is saved with the identity; changing
+this environment variable does not move an existing bus. Without it, the
+host selects a public n0 relay. `AGENTBUS_RELAY_ONLY=1` disables direct UDP
+paths for relay diagnostics on either host or clients.
 
 ## For agents
 
@@ -334,6 +376,6 @@ not from missing structure. Lines are debuggable with `cat`.
 [MIT](LICENSE).
 
 <div align="center">
-<sub>Built on <a href="https://github.com/tailscale/tailcat">tailcat</a>.
-WireGuard is a registered trademark of Jason A. Donenfeld.</sub>
+<sub>Uses <a href="https://www.iroh.computer/">Iroh</a> through
+<a href="https://github.com/n0-computer/iroh">official Rust Iroh</a>.</sub>
 </div>

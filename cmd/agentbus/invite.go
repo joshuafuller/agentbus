@@ -27,9 +27,15 @@ Download the installer, read it, then run it:
     cat /tmp/agentbus-install.sh   # review before running
     sh /tmp/agentbus-install.sh
 
-Or build from source: gh repo clone {REPO} && cd agentbus &&
-go build -o ~/.local/bin/agentbus ./cmd/agentbus
+Or build from source with Go 1.26.7 and Rust 1.93.0:
+    gh repo clone {REPO} && cd agentbus && make install
+This installs both agentbus and its matching agentbus-iroh helper.
 If neither works (e.g. no repository access), stop and tell your operator.
+
+Check that "agentbus help" mentions tickets starting with "ab1". A build
+that mentions "tc" uses the older incompatible transport. If the installer
+still delivers that version, obtain an Iroh build from your operator
+before continuing; this bus cannot be joined with an older release.
 
 ## 2. Set up the wake wiring — one command
 
@@ -72,6 +78,9 @@ func invite(ticket, name string) string {
 }
 
 func runInvite(ticket, name string) error {
+	if _, _, err := parseTicket(ticket); err != nil {
+		return err
+	}
 	fmt.Print(invite(ticket, name))
 	return nil
 }

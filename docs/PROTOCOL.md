@@ -1,7 +1,7 @@
 # Wire protocol (v0)
 
-The bus protocol is newline-delimited UTF-8 text over a single tailcat
-stream on virtual TCP port `2255`. It is intentionally trivial: every line
+The bus protocol is newline-delimited UTF-8 text over one Iroh
+bidirectional QUIC stream negotiated with ALPN `agentbus/1`. It is intentionally trivial: every line
 is human-readable and debuggable with `cat`. This is a v0 protocol with no
 stability promise.
 
@@ -242,8 +242,43 @@ one of:
 
 ## Transport
 
-Framing above is independent of transport. The transport is
-[tailcat](https://github.com/tailscale/tailcat): the ticket (`tc…`) encodes
-the host's public key and relay info; `Client.DialTCPPort(2255)` opens a
-WireGuard-encrypted QUIC stream to the host's `OnTCP` handler, which hands
-the `net.Conn` to `Hub.Serve`.
+Framing above is independent of transport. Agentbus uses
+[official Rust Iroh](https://github.com/n0-computer/iroh) `1.3.0`
+in the `agentbus-iroh` helper. A private Unix socket supplies the `net.Conn`
+to `Hub.Serve`. Each CLI dial owns one helper endpoint and QUIC connection; closing it releases the stream,
+relay session and UDP socket. Stream read/write deadlines retain the
+handshake, liveness and transfer timeouts used by the bus.
+
+### Ticket and admission (v1)
+
+An agentbus ticket is `ab1` followed by unpadded base64url encoding of:
+
+1. A random 32-byte admission secret.
+2. An Iroh endpoint ticket's binary representation (endpoint ID and routes).
+
+Host-issued tickets contain the host endpoint ID and its persisted relay
+URL, excluding changing UDP ports/IPs so issued tickets survive a restart.
+Iroh can upgrade the connection to a direct path using NAT traversal.
+An endpoint ticket by itself is public addressing information, not bus
+admission. The entire `ab1…` string is a bearer credential.
+
+After endpoint authentication with TLS 1.3, the client writes exactly the
+32 admission bytes to its first bidirectional stream. The host compares
+these bytes in constant time and replies with the single byte `0x01` on
+success. Failure closes the connection without entering the hub. Only
+then does the client send `HELLO`. Admission has a 15-second server deadline
+and fits inside the client's 30-second dial deadline. It is not sent as
+QUIC 0-RTT application data.
+
+Tickets are limited to 4096 characters and eight supported transport
+addresses. Malformed versions, empty/zero admission secrets and unsupported
+routes are rejected before network use. Host identity stores a versioned
+endpoint private seed, admission secret and relay URL in
+`~/.agentbus/host/identity.json` (0600). Tailcat identities and `tc…` tickets
+are deliberately incompatible: use `host --new-ticket` and new boarding
+passes. Rotation resets TOFU bindings and preserves the durable spool.
+
+The default relay map is n0's public map. `AGENTBUS_RELAY` selects a relay
+for a new identity; resumed hosts use their saved relay. Host startup waits
+up to 30 seconds for that relay. `AGENTBUS_RELAY_ONLY=1` disables direct
+IP transports for diagnostics. It does not disable stream encryption.
