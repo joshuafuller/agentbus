@@ -6,11 +6,12 @@ import (
 )
 
 func TestInviteIsSelfContained(t *testing.T) {
-	got := invite("tcABC123", "codex-2")
+	got := invite("ab1ABC123", "codex-2")
 	for _, want := range []string{
-		"tcABC123", "codex-2", "install.sh", "agentbus join",
+		"ab1ABC123", "codex-2", "install.sh", "agentbus join",
 		"agentbus send", "review before running", "agentbus wire claude",
 		"agentbus wire codex", "confirm with your operator", repoSlug,
+		"Iroh build", "ab1", "before continuing", "make install", "Rust",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("invite missing %q", want)

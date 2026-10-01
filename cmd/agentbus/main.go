@@ -1,4 +1,4 @@
-// Command agentbus is a tiny multi-agent message bus over tailcat.
+// Command agentbus is a tiny multi-agent message bus over Iroh.
 //
 // One machine hosts the bus and prints a ticket. Any number of agents
 // (or humans) join with that ticket from anywhere; every line one
@@ -25,11 +25,7 @@ import (
 
 	"github.com/joshuafuller/agentbus/internal/bus"
 	"github.com/joshuafuller/agentbus/internal/task"
-	"github.com/tailscale/tailcat"
 )
-
-// busPort is the virtual TCP port the bus speaks on inside the tunnel.
-const busPort = 2255
 
 // heartbeatEvery is how often a long-lived connection pings the hub.
 // A var so tests can shrink it; must stay well under the hub's default
@@ -70,8 +66,8 @@ Flags:
 
 Examples:
   agentbus host --name hub --inbox ~/.agentbus/inbox
-  agentbus join tc0abc... --name codex-1 --on-msg 'codex queue --thread "$T" --message "$AGENTBUS_MSG"'
-  agentbus send tc0abc... --name claude "DONE task-1: refactor is green"
+  agentbus join ab1abc... --name codex-1 --on-msg 'codex queue --thread "$T" --message "$AGENTBUS_MSG"'
+  agentbus send ab1abc... --name claude "DONE task-1: refactor is green"
 `
 
 func main() {
@@ -144,6 +140,12 @@ func main() {
 	case "await":
 		fs.Parse(args)
 		err = runAwait(*inbox)
+	case "reply-tool":
+		if len(args) != 1 {
+			err = fmt.Errorf("reply-tool needs a configuration file")
+		} else {
+			err = runReplyTool(args[0])
+		}
 	case "wire":
 		if len(args) < 1 {
 			fmt.Fprintln(os.Stderr, "agentbus: wire needs a runtime (claude or codex) and a ticket")
@@ -184,6 +186,17 @@ func defaultName() string {
 	if err != nil {
 		return "rider"
 	}
+	return nameFromHostname(h)
+}
+
+func nameFromHostname(h string) string {
+	// ponytail: long hostnames share a 64-byte prefix; use --name to disambiguate.
+	if len(h) > 64 {
+		h = h[:64]
+	}
+	if !bus.ValidName(h) {
+		return "rider"
+	}
 	return h
 }
 
@@ -191,11 +204,11 @@ func defaultName() string {
 // before or after it.
 func popTicket(args []string) (ticket string, rest []string) {
 	for i, a := range args {
-		if strings.HasPrefix(a, "tc") && !strings.HasPrefix(a, "-") {
+		if strings.HasPrefix(a, ticketPrefix) && !strings.HasPrefix(a, "-") {
 			return a, append(append([]string{}, args[:i]...), args[i+1:]...)
 		}
 	}
-	fmt.Fprintln(os.Stderr, "agentbus: need a ticket (starts with \"tc\")")
+	fmt.Fprintln(os.Stderr, "agentbus: need an Iroh bus ticket (starts with \"ab1\"); legacy Tailcat tickets require a new boarding pass")
 	os.Exit(2)
 	return "", nil
 }
@@ -249,7 +262,7 @@ func runHost(name, onMsg string, newTicket bool, sink *bus.Sink) error {
 	// saved identity, and TOFU bindings reload so a restart cannot
 	// re-open the trust-on-first-use window for known rider names.
 	stateDir, stateErr := hostStateDir()
-	var identity *tailcat.PrivateKey
+	var identity *hostIdentity
 	if stateErr == nil {
 		if newTicket {
 			if err := resetHostState(stateDir); err != nil {
@@ -268,7 +281,10 @@ func runHost(name, onMsg string, newTicket bool, sink *bus.Sink) error {
 	}
 	resumed := identity != nil
 	if identity == nil {
-		identity = tailcat.NewPrivateKey()
+		identity, err = newHostIdentity()
+		if err != nil {
+			return err
+		}
 	}
 	if blobs != nil {
 		// Host-local blob receipts must be addressed back to the put
@@ -297,42 +313,14 @@ func runHost(name, onMsg string, newTicket bool, sink *bus.Sink) error {
 	} else {
 		fmt.Fprintf(os.Stderr, "agentbus: no home dir (%v) — offline spool disabled\n", err)
 	}
-	srv := &tailcat.Server{
-		Key:  identity.Private,
-		Logf: logf(),
-		OnTCP: func(port uint16) func(net.Conn) {
-			if port != busPort {
-				return nil
-			}
-			return func(c net.Conn) { hub.Serve(c) }
-		},
-	}
-	if resumed {
-		// The saved DERP region must be reused, or the same key would
-		// mint a DIFFERENT ticket and riders holding the old one would
-		// bootstrap via a relay nobody listens on.
-		if len(identity.Public.Region) > 0 {
-			srv.Region = identity.Public.Region[0]
-		} else if identity.Public.RegionID != 0 {
-			srv.RegionID = identity.Public.RegionID
-		}
-	}
-	if err := srv.Start(); err != nil {
+	srv, ticket, err := startHostTransport(context.Background(), identity, hub.Serve)
+	if err != nil {
 		return err
 	}
-	defer srv.Close()
-
-	ticket := srv.ConnBlob()
+	defer srv.Shutdown(context.Background())
 	if !resumed && stateErr == nil {
-		// First start: persist the identity (key + the region Start
-		// picked) so the NEXT start resumes this exact ticket.
-		if ci, perr := tailcat.ParseConnBlob(ticket); perr == nil {
-			identity.Public = ci
-			if serr := saveHostIdentity(stateDir, identity); serr != nil {
-				fmt.Fprintf(os.Stderr, "agentbus: could not save the host identity (%v) — this ticket will not survive a restart\n", serr)
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "agentbus: could not parse own ticket (%v) — this ticket will not survive a restart\n", perr)
+		if err := saveHostIdentity(stateDir, identity); err != nil {
+			return fmt.Errorf("save host identity: %w", err)
 		}
 	}
 	if resumed {
@@ -351,15 +339,8 @@ func runHost(name, onMsg string, newTicket bool, sink *bus.Sink) error {
 		}
 	}
 	// stdin closed (e.g. running in background): keep serving.
-	select {}
-}
-
-func dial(ticket string) (net.Conn, error) {
-	c := tailcat.NewClient(tailcat.ConnBlob(ticket))
-	c.Logf = logf()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	return c.DialTCPPort(ctx, busPort)
+	<-srv.Closed()
+	return fmt.Errorf("Iroh host endpoint closed")
 }
 
 // riderDir is a participant's home: conversation state, task store,
@@ -448,6 +429,9 @@ func (w *reconnectWriter) Attach(f func(string) error) {
 // redial with backoff, not to die and leave a deaf agent. Only a
 // permanent end (refused name, displaced by a newer join) exits.
 func runJoin(ticket, name, onMsg string, sink *bus.Sink) error {
+	if _, _, err := parseTicket(ticket); err != nil {
+		return err
+	}
 	// Every join is keyed (issue #6): the first join under a name binds
 	// it (TOFU) and every later connection must prove the same key.
 	rdir, err := riderDir(name)
@@ -785,6 +769,8 @@ func runSend(ticket, name, to, msg string) error {
 	if err != nil {
 		return err
 	}
+	// Bound the whole handshake as well as the later delivery receipt.
+	conn.SetDeadline(time.Now().Add(15 * time.Second))
 	// Authenticate when we hold this name's key (an operator sending
 	// under their rider's name on the same host); a bound name refuses
 	// unkeyed sends outright (issue #6).

@@ -7,13 +7,19 @@ useDefault = true
 
 # A live bus ticket is a credential: whoever holds it is on the bus and
 # can send tasks to every wired rider. Tickets must never be committed.
-# Real tickets are "tc" + 100+ base64url chars; docs use short elided
-# examples ("tcomFw...") which stay under this threshold on purpose.
+# Iroh bus tickets start "ab1"; legacy Tailcat tickets start "tc".
+# Docs use short elided examples which stay under the threshold.
 [[rules]]
 id = "agentbus-ticket"
 description = "agentbus bus ticket (live admission credential)"
 regex = '''\btc[A-Za-z0-9_-]{60,}\b'''
 keywords = ["tc"]
+
+[[rules]]
+id = "agentbus-iroh-ticket"
+description = "agentbus Iroh bus ticket (live admission credential)"
+regex = '''\bab1[A-Za-z0-9_-]{60,}\b'''
+keywords = ["ab1"]
 
 [allowlist]
 description = "Non-secret paths and known-dead examples"

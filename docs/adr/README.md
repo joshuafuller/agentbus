@@ -19,3 +19,5 @@ be able to reconstruct *why* a past choice looked right at the time.
 | [0002](0002-rider-identity-signed-agent-cards.md) | Rider identity via per-rider keys and signed Agent Cards | Accepted |
 | [0003](0003-addressed-delivery-primary.md) | Addressed delivery as the primary path; broadcast as observability | Accepted |
 | [0004](0004-prior-art-activation-is-the-product.md) | Prior art: steal the delivery and identity mechanics; activation is the product | Accepted |
+| [0005](0005-iroh-transport.md) | Iroh transport with explicit ticket admission | Superseded by 0006 |
+| [0006](0006-official-rust-iroh.md) | Official Rust Iroh owns network transport | Accepted |

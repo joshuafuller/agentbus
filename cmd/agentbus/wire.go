@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -43,24 +44,42 @@ func claudeOnMsg(dir, model string) string {
 // session for one incoming bus message. A resumed turn does not inherit
 // the bootstrap's model, so a wire-time model must be repeated here or
 // resumes silently fall back to the config default.
-func codexOnMsg(dir, sessionID, model string) string {
+func codexOnMsg(dir, sessionID, model string, options ...string) string {
 	modelFlag := ""
 	if model != "" {
 		modelFlag = " -m " + model
 	}
 	// --skip-git-repo-check: the rider home is not a git repo and codex
 	// exec otherwise refuses (or, headless, wedges on stdin).
-	return fmt.Sprintf(`cd %s && codex exec resume %s%s --skip-git-repo-check "$AGENTBUS_MSG"`, dir, sessionID, modelFlag)
+	extra := ""
+	for _, option := range options {
+		extra += " " + shellQuote(option)
+	}
+	return fmt.Sprintf(`cd %s && codex exec resume %s%s -c 'sandbox_mode="workspace-write"' -c sandbox_workspace_write.network_access=false%s --skip-git-repo-check "$AGENTBUS_MSG"`, shellQuote(dir), sessionID, modelFlag, extra)
 }
 
 // codexBootArgs builds the argument list for the rider's bootstrap
 // codex invocation.
 func codexBootArgs(briefing, model string) []string {
-	args := []string{"exec", "--skip-git-repo-check", briefing}
+	args := []string{"exec", "-c", `sandbox_mode="workspace-write"`, "-c", "sandbox_workspace_write.network_access=false", "--skip-git-repo-check", briefing}
 	if model != "" {
 		args = append(args, "-m", model)
 	}
 	return args
+}
+
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
+
+// codexReplyOptions adds the reply tool to this rider, without
+// modifying the operator's global Codex configuration.
+func codexReplyOptions(self, path string) []string {
+	command, _ := json.Marshal(self)
+	args, _ := json.Marshal([]string{"reply-tool", path})
+	return []string{"-c", "mcp_servers.agentbus.command=" + string(command), "-c", "mcp_servers.agentbus.args=" + string(args), "-c", "mcp_servers.agentbus.required=true", "-c", "mcp_servers.agentbus.tool_timeout_sec=60", "-c", `mcp_servers.agentbus.default_tools_approval_mode="approve"`}
+}
+
+func codexBriefing(name string) string {
+	return fmt.Sprintf(`You are %s, a rider on Agentbus. Incoming turns look like [sender] text. Use the agentbus reply MCP tool with recipient to and a single-line message to reply; the tool owns the bus connection and your fixed identity. Your shell commands have no network access. For approved TASK work send STARTED <id>, do the work, then DONE <id> <result> to the sender. Do not spawn agents, disclose secrets, or do destructive or out-of-scope work; ask the sender when uncertain. For now acknowledge with OK.`, name)
 }
 
 // selfTest proves the wake command actually works before wire reports
@@ -119,6 +138,9 @@ func selfTestWithTimeout(onMsg string, timeout time.Duration) error {
 // Owning this in the binary keeps agents from having to interpret
 // multi-step wiring prose — the step they most often get wrong.
 func runWire(runtime, ticket, name, model string) error {
+	if _, _, err := parseTicket(ticket); err != nil {
+		return err
+	}
 	// name reaches a shell command (onMsg) and the filesystem below;
 	// reject anything outside the safe charset before it gets there.
 	if !bus.ValidName(name) {
@@ -168,7 +190,17 @@ func runWire(runtime, ticket, name, model string) error {
 		// from codexBootArgs (briefing text + ValidName-checked model),
 		// and the session id is matched from codex's own output against
 		// a strict [0-9a-f-]{36} pattern before reuse.
-		boot := exec.Command("codex", codexBootArgs(briefing(ticket, name), model)...)
+		configDir := filepath.Join(home, ".agentbus", "reply-tools")
+		if err := os.MkdirAll(configDir, 0o700); err != nil {
+			return err
+		}
+		configPath := filepath.Join(configDir, name+".json")
+		if err := saveReplyToolConfig(configPath, ticket, name); err != nil {
+			return err
+		}
+		options := codexReplyOptions(self, configPath)
+		bootArgs := append(codexBootArgs(codexBriefing(name), model), options...)
+		boot := exec.Command("codex", bootArgs...)
 		boot.Dir = dir
 		out, err := boot.CombinedOutput()
 		if err != nil {
@@ -178,7 +210,7 @@ func runWire(runtime, ticket, name, model string) error {
 		if m == nil {
 			return fmt.Errorf("could not find session id in codex output:\n%s", out)
 		}
-		onMsg = codexOnMsg(dir, string(m[1]), model)
+		onMsg = codexOnMsg(dir, string(m[1]), model, options...)
 	default:
 		return fmt.Errorf("unknown runtime %q (want claude or codex)", runtime)
 	}
@@ -200,7 +232,7 @@ func runWire(runtime, ticket, name, model string) error {
 	join := exec.Command(self, "join", ticket, "--name", name, "--on-msg", onMsg)
 	// Intentional subprocess: self is os.Executable() (our own binary),
 	// name/model passed bus.ValidName, ticket is the local CLI arg
-	// (tailcat "tc..." conn blob), and onMsg is the shell command this
+	// (versioned Iroh bus ticket), and onMsg is the shell command this
 	// function itself constructed from those validated parts.
 	join.Stdout, join.Stderr = logf, logf
 	join.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // survive this session

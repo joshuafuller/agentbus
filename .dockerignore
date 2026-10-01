@@ -6,3 +6,6 @@
 docs
 assets
 *.md
+
+/agentbus-iroh
+/transport/iroh/target

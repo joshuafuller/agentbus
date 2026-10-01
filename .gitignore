@@ -3,3 +3,11 @@
 *.log
 .env
 .env.*
+
+# Runtime state and raw verification output stay local.
+.agentbus/
+*.jsonl
+/agentbus-proof-*/
+
+/agentbus-iroh
+/transport/iroh/target/

@@ -13,13 +13,13 @@ ticket reaches it from anywhere.
 _Avoid_: channel, network, mesh, room.
 
 **Ticket**:
-The single pasteable string (starts `tc`) that both names a bus and admits
+The single pasteable string that both names a bus and admits
 anyone who holds it. It is the only credential — treat it like a password.
 _Avoid_: token, invite code, join link.
 
 **Host**:
-The one machine and process that runs the relay and prints the ticket. If the
-host dies, the bus is gone and participants rejoin a new ticket.
+The one machine and process that runs the relay and prints the ticket.
+Participants depend on it to exchange messages.
 _Avoid_: server, coordinator, master.
 
 **Hub**:
@@ -58,7 +58,7 @@ _Avoid_: id, handle, alias.
 
 **Key**:
 The Ed25519 keypair a Rider proves to claim its Name. The first key to prove a
-Name **binds** it (trust on first use) for the life of the host process.
+Name **binds** it (trust on first use) until the bus ticket is rotated.
 _Avoid_: credential, secret, token.
 
 ## What moves, and what it does

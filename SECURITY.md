@@ -16,7 +16,7 @@ flowchart TB
     TH(["ticket holder<br/>(UNTRUSTED)"]) -->|any bus message| TUN
 
     subgraph boundary["trust boundary: the tunnel"]
-        TUN["WireGuard tunnel (tailcat)"] --> HUB["hub<br/>relays every line"]
+        TUN["Iroh TLS 1.3 + admission secret"] --> HUB["hub<br/>relays every line"]
     end
 
     CLI --> HUB
@@ -48,7 +48,7 @@ Two parties are outside your control:
 | T5 | Plaintext bus history on disk (inbox, rider join.log) | MEDIUM | Mitigated — rider dir `0700`, inbox & log `0600` |
 | T6 | Oversized-line / flood abuse by a rider | MEDIUM | Partly mitigated — 256 KB line cap; no rate limit yet |
 | T7 | Ticket rotation is all-or-nothing (`host --new-ticket`); no per-rider revocation | MEDIUM | Open — see "Rotation & revocation" |
-| T8 | Supply chain: pinned tailcat (no stability promise); installer fetches a release binary | LOW | Pinned versions; installer reviewed before run |
+| T8 | Supply chain: official Rust Iroh helper and Go CLI; installer fetches a paired archive | LOW | Pinned versions; installer reviewed before run |
 
 ### T1 — execution is the product
 
@@ -128,20 +128,30 @@ norm).
 
 ### Rotation & revocation (T7)
 
-The ticket embeds the host's node public key, which since #34 persists
+The ticket embeds the host's endpoint public key and a separate random
+256-bit admission secret, which persist
 under `~/.agentbus/host/` — a plain restart resumes the same ticket. To
 invalidate a ticket, restart the host with `--new-ticket` (new key → new
 ticket, TOFU bindings wiped with it). There is no in-place rekey and no
-way to kick a single rider. The identity file holds the node PRIVATE
-key (0600, dir 0700): whoever reads it can impersonate the bus.
+way to kick a single rider. The identity file holds the endpoint PRIVATE
+seed and admission secret (0600, dir 0700): whoever reads it can impersonate
+the bus and join it. Each Iroh connection proves an endpoint key; the bus
+still uses its existing separate name key and TOFU handshake.
 
-This is a real limitation, not a recommendation. tailcat exposes
-`Server.AllowedClients` / `AddAllowedClient` (per-client key allowlisting),
-which is the intended path to per-rider revocation without tearing down the
-bus. It is deliberately not wired yet — admission/identity machinery is
-held until real usage shows it is needed (the project's design discipline
-is to prove the transport loop before adding admission complexity). Tracked
-as future work.
+Iroh endpoint addresses and endpoint tickets are public connection
+information. Agentbus checks the ticket's admission secret inside the
+host-authenticated TLS stream, in constant time, before calling `Hub.Serve`.
+Knowing the endpoint ID or relay URL alone grants no bus access. Admission
+is not sent as 0-RTT application data. Invalid secrets close the connection;
+unclaimed participant names retain the existing legacy behavior only
+AFTER bus admission. Admission is bounded to 15 seconds on the host.
+
+Tailcat host state and old `tc…` tickets are incompatible. The upgrade
+fails visibly until the operator rotates with `host --new-ticket` and
+issues new boarding passes; it does not silently replace stored identity.
+The durable spool and rider keys survive rotation. Per-rider revocation
+would require an application admission policy rather than a shared bearer
+secret; it remains future work.
 
 ## Handling the ticket
 
@@ -172,7 +182,51 @@ vulnerability.
 
 ## Scope of assurance
 
-agentbus has not had a professional security audit. The transport's
-cryptography is tailcat's (WireGuard); agentbus does not implement its own.
-Same-host tests confirm the tunnel is genuinely used, but WAN traversal and
-adversarial multiparty behavior are not yet independently verified.
+agentbus has not had a professional security audit. Participant-to-host
+connections use official Rust Iroh `1.3.0` for TLS endpoint authentication,
+QUIC, NAT traversal and relay fallback. Agentbus does not patch upstream
+Iroh. The helper and Go CLI are separate executables; Cargo.lock pins the
+Rust dependency tree. The Go ticket/key codec remains pinned for compatibility,
+but the Go implementation's network stack is absent from the CLI dependency
+graph. This is not a security audit of Agentbus or its local bridge.
+
+Each helper receives its configuration and host seed over inherited stdin.
+Stream sockets are mode 0600 inside a fresh mode-0700 directory. No secrets
+are passed in helper command arguments. Parent pipe EOF stops the helper;
+Go reaps it and removes its private sockets. Admission and the signed bus
+handshake remain in Go, before any traffic reaches the hub. Other processes
+running as the same user, and root, remain trusted local actors.
+
+Network relays forward encrypted participant-to-host traffic. The bus host
+can read every message and the durable spool; this transport change does
+not add participant-to-participant group encryption. Local direct and
+forced-relay tests exercise admission, deadlines, restart persistence and
+activation, but do not prove WAN traversal, adversarial multiparty behavior
+or model/runtime reliability.
+
+Public n0 relays are for development/testing. Use `AGENTBUS_RELAY` for a
+new identity backed by a dedicated relay. The saved relay is part of the
+ticket; if unavailable, host startup fails rather than silently minting a
+new ticket. HTTP relays are supported for local testing; use HTTPS for
+remote deployment. Relay access policy and bus admission are separate.
+
+### Codex reply tool
+
+`agentbus wire codex` explicitly uses Codex's workspace-write sandbox with
+command network access disabled. The trusted `agentbus reply-tool` stdio
+MCP process owns Iroh networking. Its single `reply` tool accepts only a
+recipient name and one message line (at most 60 KiB). The configured ticket
+and sender identity cannot be overridden by tool arguments; replies use the
+existing signed oneshot path and require the host's durability receipt.
+
+The ticket is stored atomically with mode 0600 under
+`~/.agentbus/reply-tools/<name>.json`, outside the rider working directory.
+It is absent from the Codex briefing and tool results. This separates
+network capability, not Unix-user credentials: processes with access to
+the operator's files can still read that file. Guard it as a ticket.
+
+Codex's model-provider connection and operator-configured MCP servers
+remain governed by Codex configuration. Disabling command network access
+is not a claim that all Codex tools or the whole machine are offline.
+The reply tool can send to any rider on the configured bus; it is not a
+content filter or protection against sending sensitive text on that bus.
