@@ -6,7 +6,7 @@ CLI, wire format, and APIs may change without notice.
 
 ## [Unreleased]
 
-## v0.4.0 (release candidate)
+## v0.4.0
 
 Agentbus uses Iroh QUIC instead of Tailcat. Host identity and tickets persist
 across restarts; addressed delivery, task handling and file transfer keep
@@ -34,8 +34,9 @@ admission rejection, deadlines, saved identity/TOFU and spool delivery after
 restart, and helper ownership/cleanup. A local Docker lab passes two repeated
 NAT outage/recovery cycles with traffic-denial controls. Real Claude and Codex
 riders exchanged challenges and replies in both directions over the public
-relay on one machine, with Codex command networking disabled. Separate-ISP
-NAT traversal and native macOS/ARM64 builds remain release qualification gates.
+relay on one machine, with Codex command networking disabled. Native Linux
+and macOS builds and tests pass on amd64 and arm64. Separate-ISP NAT
+traversal remains unverified.
 See SECURITY.md for transport and capability boundaries.
 
 ### Changed

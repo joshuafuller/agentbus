@@ -31,6 +31,10 @@ jobs:
       - run: rustup override set 1.93.0
       - run: make check
       - run: make release
+      - name: Verify packaged executable versions
+        run: |
+          helper_version=$(./agentbus-iroh --version | awk '{print $2}')
+          ./agentbus version | grep -F "agentbus v$helper_version ("
       - run: python3 tools/test-install.py
       - uses: actions/upload-artifact@v4
         with:

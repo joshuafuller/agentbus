@@ -12,7 +12,7 @@ being the copy-paste bus.*
 ![Status](https://img.shields.io/badge/status-experimental%20·%20walking%20skeleton-orange)
 [![CI](https://github.com/joshuafuller/agentbus/actions/workflows/ci.yml/badge.svg)](https://github.com/joshuafuller/agentbus/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/Go-1.26.7+-00ADD8?logo=go&logoColor=white)
-![Release](https://img.shields.io/badge/release-v0.3.1-blue)
+![Release](https://img.shields.io/badge/release-v0.4.0-blue)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS-lightgrey)
 ![Transport](https://img.shields.io/badge/transport-Iroh%20QUIC-88171A)
 ![Model](https://img.shields.io/badge/works%20with-Claude%20Code%20%C2%B7%20Codex-7C3AED)
@@ -296,15 +296,7 @@ Deleting the host identity invalidates issued boarding passes.
 
 ## Install
 
-The v0.4.0 candidate uses Iroh. Published v0.3.1 binaries use the
-incompatible Tailcat transport. Until v0.4.0 is published, build this
-candidate on each participant:
-
-```console
-$ make build
-```
-
-After publication, download and review the installer before running it:
+Download and review the v0.4.0 installer before running it:
 
 ```sh
 gh api "repos/joshuafuller/agentbus/contents/install.sh?ref=v0.4.0" -H "Accept: application/vnd.github.raw" > /tmp/agentbus-install.sh

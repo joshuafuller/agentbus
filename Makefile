@@ -4,6 +4,7 @@ PKG        := ./cmd/agentbus
 DIST       := dist
 PLATFORM   = $(shell $(GO) env GOOS)-$(shell $(GO) env GOARCH)
 CARGO      ?= cargo
+RELEASE_VERSION := $(shell sed -n 's/^version = "\(.*\)"/v\1/p' transport/iroh/Cargo.toml)
 GO         ?= go
 LDFLAGS    := -X main.version=$(shell git describe --tags --always 2>/dev/null || echo dev) \
               -X main.commit=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown) \
@@ -62,7 +63,7 @@ helper:
 .PHONY: release
 release: build
 	@mkdir -p $(DIST)
-	CGO_ENABLED=0 $(GO) build -buildvcs=false -trimpath -ldflags "-s -w $(LDFLAGS)" -o $(BIN) $(PKG)
+	CGO_ENABLED=0 $(GO) build -buildvcs=false -trimpath -ldflags "-s -w $(LDFLAGS) -X main.version=$(RELEASE_VERSION)" -o $(BIN) $(PKG)
 	tar -czf $(DIST)/agentbus-$(PLATFORM).tar.gz agentbus agentbus-iroh
 	cd $(DIST) && if command -v sha256sum >/dev/null 2>&1; then sha256sum agentbus-*.tar.gz; else shasum -a 256 agentbus-*.tar.gz; fi > SHA256SUMS
 
